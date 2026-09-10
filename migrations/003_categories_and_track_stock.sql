@@ -14,5 +14,7 @@ CREATE TABLE IF NOT EXISTS categories (
 INSERT IGNORE INTO categories (name, sort_order)
 SELECT category, 0 FROM (SELECT DISTINCT category FROM products) AS existing;
 
-ALTER TABLE products
-  ADD COLUMN IF NOT EXISTS track_stock TINYINT(1) NOT NULL DEFAULT 1 AFTER stock_min;
+-- products.track_stock is added by Migrator::migrateToV2() (src/Migrator.php), not here:
+-- "ADD COLUMN IF NOT EXISTS" needs MySQL 8.0.29+ / fails as a syntax error on older MySQL
+-- (common on shared hosting), so the column's existence is checked in PHP instead via
+-- information_schema, which every supported MySQL/MariaDB version understands.

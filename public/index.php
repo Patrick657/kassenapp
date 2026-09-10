@@ -12,7 +12,13 @@ $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '/';
 
 if (str_starts_with($path, '/api/')) {
     $db = Db::get();
-    (new Migrator($db))->ensureUpToDate();
+    try {
+        (new Migrator($db))->ensureUpToDate();
+    } catch (\Throwable $e) {
+        // A migration failing must never take the whole site down — log it and let the request
+        // proceed; endpoints that don't touch the not-yet-migrated schema keep working normally.
+        error_log('[Festkasse Migrator] ' . $e->getMessage());
+    }
     $api = new Api($db, (bool) $config['https']);
     $api->handle($_SERVER['REQUEST_METHOD'], $path);
     exit;

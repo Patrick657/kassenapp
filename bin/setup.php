@@ -8,22 +8,18 @@ require_once __DIR__ . '/../src/bootstrap.php';
 $config = require __DIR__ . '/../config/config.php';
 
 use Festkasse\Db;
+use Festkasse\Migrator;
 
 $opts = getopt('', ['access-code:', 'delete-code:', 'demo']);
 
 $db = Db::get();
 
-echo "Wende Migrationen an…\n";
-$migrationFiles = glob(__DIR__ . '/../migrations/*.sql') ?: [];
-sort($migrationFiles);
-foreach ($migrationFiles as $file) {
-    if (str_contains(basename($file), 'seed')) {
-        continue; // seed files are opt-in via --demo below, not part of the schema
-    }
-    echo '  - ' . basename($file) . "\n";
-    $db->exec(file_get_contents($file));
-}
+echo "Wende Basis-Schema an…\n";
+$db->exec(file_get_contents(__DIR__ . '/../migrations/001_schema.sql'));
 
+// Demo articles must exist BEFORE later migrations run, not after: migration v2's categories
+// backfill reads DISTINCT products.category — on a brand-new install with --demo, that has to
+// see the seeded demo articles, or the categories table ends up empty despite matching products.
 if (isset($opts['demo'])) {
     $existing = (int) $db->query('SELECT COUNT(*) FROM products')->fetchColumn();
     if ($existing === 0) {
@@ -33,6 +29,9 @@ if (isset($opts['demo'])) {
         echo "Artikel bereits vorhanden — Demo-Daten übersprungen.\n";
     }
 }
+
+echo "Wende weitere Migrationen an…\n";
+(new Migrator($db))->ensureUpToDate();
 
 $accessCode = $opts['access-code'] ?? null;
 $deleteCode = $opts['delete-code'] ?? null;

@@ -9,15 +9,18 @@ use PDO;
  * Applies pending schema migrations automatically on the next request. Exists because some
  * deployments have no SSH/CLI access at all (shared hosting with only a web file manager) — for
  * those, "upload the new files" has to be the entire deployment step, migrations included.
- * 001_schema.sql is the implicit baseline (version 1); every schema change after that gets an
- * entry here. Each migration file must stay safe to re-run (CREATE TABLE IF NOT EXISTS, INSERT
- * IGNORE, ADD COLUMN IF NOT EXISTS, ...) since two requests could race on a fresh deploy.
+ * 001_schema.sql is the implicit baseline (version 1); every schema change after that gets its
+ * own private method here, added to the dispatch in ensureUpToDate().
+ *
+ * Each step must stay idempotent using portable, widely-supported checks (information_schema,
+ * CREATE TABLE IF NOT EXISTS, INSERT IGNORE) rather than newer syntax sugar like MySQL 8.0.29's
+ * `ADD COLUMN IF NOT EXISTS` — shared hosts often run older MySQL where that's a syntax error,
+ * and an uncaught error here must never be able to take the whole site down (see the try/catch
+ * around the call site in public/index.php).
  */
 final class Migrator
 {
-    private const MIGRATIONS = [
-        2 => '003_categories_and_track_stock.sql',
-    ];
+    private const LATEST_VERSION = 2;
 
     public function __construct(private readonly PDO $db)
     {
@@ -25,26 +28,36 @@ final class Migrator
 
     public function ensureUpToDate(): void
     {
-        $pending = self::MIGRATIONS;
-        if (empty($pending)) {
-            return;
-        }
-        ksort($pending);
-        $latest = array_key_last($pending);
         $current = $this->currentVersion();
-        if ($current >= $latest) {
-            return;
+        if ($current < 2) {
+            $this->migrateToV2();
+            $this->setVersion(2);
         }
-        foreach ($pending as $version => $file) {
-            if ($version <= $current) {
-                continue;
-            }
-            $path = __DIR__ . '/../migrations/' . $file;
-            $sql = file_get_contents($path);
-            if ($sql !== false) {
-                $this->db->exec($sql);
-            }
-            $this->setVersion($version);
+    }
+
+    /** Artikelgruppen as a managed table + per-article stock tracking. */
+    private function migrateToV2(): void
+    {
+        $sql = file_get_contents(__DIR__ . '/../migrations/003_categories_and_track_stock.sql');
+        if ($sql !== false) {
+            $this->db->exec($sql);
+        }
+        $this->ensureColumn(
+            'products',
+            'track_stock',
+            'ALTER TABLE products ADD COLUMN track_stock TINYINT(1) NOT NULL DEFAULT 1 AFTER stock_min'
+        );
+    }
+
+    private function ensureColumn(string $table, string $column, string $alterSql): void
+    {
+        $stmt = $this->db->prepare(
+            'SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?'
+        );
+        $stmt->execute([$table, $column]);
+        if ((int) $stmt->fetchColumn() === 0) {
+            $this->db->exec($alterSql);
         }
     }
 
@@ -64,6 +77,9 @@ final class Migrator
 
     private function setVersion(int $version): void
     {
+        if ($version > self::LATEST_VERSION) {
+            return;
+        }
         $stmt = $this->db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
         $stmt->execute(['schema_version', (string) $version]);
     }

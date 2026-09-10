@@ -70,17 +70,24 @@ GRANT ALL PRIVILEGES ON kassen_app.* TO 'kassen'@'localhost';
 
 ## Schema migrations
 
-Every schema change after the baseline (`001_schema.sql`) ships as a new numbered file in
-`migrations/`. You don't need to run these by hand:
+Every schema change after the baseline (`001_schema.sql`) gets its own private method in
+`src/Migrator.php`, dispatched from `ensureUpToDate()` based on a `schema_version` row in
+`settings`. You don't need to run these by hand:
 
-- **With SSH**: `php bin/setup.php` (with or without the code flags) re-applies every non-seed
-  migration file it finds, in order. Safe to run repeatedly — each file uses
-  `CREATE TABLE IF NOT EXISTS` / `INSERT IGNORE` / `ADD COLUMN IF NOT EXISTS`.
-- **Without SSH**: no action needed. `Migrator` (`src/Migrator.php`) checks a `schema_version` row
-  in `settings` on every API request and applies whatever's missing before handling it — so
-  uploading new files through a web file manager and then just loading the page is the entire
-  deployment step, migrations included. It's a one-line class to extend: add the next
-  `version => filename` pair to `Migrator::MIGRATIONS` when you ship a new migration file.
+- **With SSH**: `php bin/setup.php` (with or without the code flags) re-applies the baseline schema
+  and then calls `Migrator::ensureUpToDate()`. Safe to run repeatedly.
+- **Without SSH**: no action needed. `public/index.php` calls the same `Migrator::ensureUpToDate()`
+  on every API request and applies whatever's missing before handling it — so uploading new files
+  through a web file manager and then just loading the page is the entire deployment step,
+  migrations included.
+
+**Why each step checks `information_schema` instead of using `ADD COLUMN IF NOT EXISTS`**: that
+syntax needs MySQL 8.0.29+ and is a hard syntax error on older MySQL — exactly the kind of thing
+shared hosting still runs. A migration failing is also never allowed to take the rest of the site
+down: the call site wraps `ensureUpToDate()` in a try/catch that logs and continues, so a DB user
+without `ALTER` rights (say) degrades the affected feature instead of 500ing every request. Add a
+new migration by bumping `Migrator::LATEST_VERSION`, writing a `migrateToVN()` method that only
+uses portable, idempotent checks, and calling it from `ensureUpToDate()`.
 
 ## Artikelgruppen & Lagerbestand pro Artikel
 
