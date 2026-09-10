@@ -6,11 +6,14 @@ $config = require __DIR__ . '/../config/config.php';
 
 use Festkasse\Api;
 use Festkasse\Db;
+use Festkasse\Migrator;
 
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '/';
 
 if (str_starts_with($path, '/api/')) {
-    $api = new Api(Db::get(), (bool) $config['https']);
+    $db = Db::get();
+    (new Migrator($db))->ensureUpToDate();
+    $api = new Api($db, (bool) $config['https']);
     $api->handle($_SERVER['REQUEST_METHOD'], $path);
     exit;
 }

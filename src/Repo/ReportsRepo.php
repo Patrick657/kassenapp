@@ -31,11 +31,11 @@ final class ReportsRepo
         $lowStockNames = [];
         if ($trackStock) {
             $rows = $this->db->query(
-                'SELECT name FROM products WHERE archived_at IS NULL AND stock <= stock_min ORDER BY stock ASC LIMIT 2'
+                'SELECT name FROM products WHERE archived_at IS NULL AND track_stock = 1 AND stock <= stock_min ORDER BY stock ASC LIMIT 2'
             )->fetchAll();
             $lowStockNames = array_map(static fn ($r) => $r['name'], $rows);
             $lowStockCount = (int) $this->db->query(
-                'SELECT COUNT(*) FROM products WHERE archived_at IS NULL AND stock <= stock_min'
+                'SELECT COUNT(*) FROM products WHERE archived_at IS NULL AND track_stock = 1 AND stock <= stock_min'
             )->fetchColumn();
         }
 
@@ -144,7 +144,7 @@ final class ReportsRepo
         }
 
         $products = $this->db->query(
-            'SELECT id, name, category, price_cents, cost_cents, stock, stock_min FROM products WHERE archived_at IS NULL ORDER BY sort_order ASC'
+            'SELECT id, name, category, price_cents, cost_cents, stock, stock_min, track_stock FROM products WHERE archived_at IS NULL ORDER BY sort_order ASC'
         )->fetchAll();
 
         $byCategory = [];
@@ -167,10 +167,12 @@ final class ReportsRepo
                 $revenue += $s['revenueCents'];
                 $qty += $s['qty'];
                 $profit += $s['qty'] * ((int) $p['price_cents'] - (int) $p['cost_cents']);
-                $stockUnits += (int) $p['stock'];
-                $stockValue += (int) $p['stock'] * (int) $p['cost_cents'];
-                if ((int) $p['stock'] <= (int) $p['stock_min']) {
-                    $lowCount++;
+                if ((bool) $p['track_stock']) {
+                    $stockUnits += (int) $p['stock'];
+                    $stockValue += (int) $p['stock'] * (int) $p['cost_cents'];
+                    if ((int) $p['stock'] <= (int) $p['stock_min']) {
+                        $lowCount++;
+                    }
                 }
                 $rows[] = ['productId' => $id, 'name' => $p['name'], 'qty' => $s['qty'], 'revenueCents' => $s['revenueCents']];
             }

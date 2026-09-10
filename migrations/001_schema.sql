@@ -110,4 +110,5 @@ INSERT IGNORE INTO settings (`key`, value) VALUES
   ('require_code',     '1'),
   ('access_ttl_sec',   '7200'),
   ('access_code_hash', ''),
-  ('delete_code_hash', '');
+  ('delete_code_hash', ''),
+  ('schema_version',   '1');

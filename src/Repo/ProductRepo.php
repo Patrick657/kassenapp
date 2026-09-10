@@ -36,25 +36,25 @@ final class ProductRepo
         return $row ?: null;
     }
 
-    public function create(string $name, string $category, int $priceCents, int $costCents, int $stock, int $stockMin): int
+    public function create(string $name, string $category, int $priceCents, int $costCents, int $stock, int $stockMin, bool $trackStock): int
     {
         $next = (int) $this->db->query('SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products')->fetchColumn();
         $stmt = $this->db->prepare(
-            'INSERT INTO products (name, category, price_cents, cost_cents, stock, stock_min, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO products (name, category, price_cents, cost_cents, stock, stock_min, track_stock, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$name, $category, $priceCents, $costCents, $stock, $stockMin, $next]);
+        $stmt->execute([$name, $category, $priceCents, $costCents, $stock, $stockMin, $trackStock ? 1 : 0, $next]);
         return (int) $this->db->lastInsertId();
     }
 
-    public function update(int $id, string $name, string $category, int $priceCents, int $costCents, ?int $stock, ?int $stockMin): void
+    public function update(int $id, string $name, string $category, int $priceCents, int $costCents, ?int $stock, ?int $stockMin, ?bool $trackStock): void
     {
         $product = $this->find($id);
         if ($product === null) {
             throw new ApiException(404, 'Artikel nicht gefunden');
         }
         $stmt = $this->db->prepare(
-            'UPDATE products SET name = ?, category = ?, price_cents = ?, cost_cents = ?, stock = ?, stock_min = ? WHERE id = ?'
+            'UPDATE products SET name = ?, category = ?, price_cents = ?, cost_cents = ?, stock = ?, stock_min = ?, track_stock = ? WHERE id = ?'
         );
         $stmt->execute([
             $name,
@@ -63,6 +63,7 @@ final class ProductRepo
             $costCents,
             $stock ?? (int) $product['stock'],
             $stockMin ?? (int) $product['stock_min'],
+            $trackStock === null ? (int) $product['track_stock'] : ($trackStock ? 1 : 0),
             $id,
         ]);
     }

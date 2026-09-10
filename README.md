@@ -17,7 +17,8 @@ Vanilla PHP backend + JSON API, vanilla JS SPA frontend — no build step, no fr
 public/     Document root — point your vhost here. Everything else stays outside the webroot.
 src/        PHP classes (Db, Auth, Api, Repo/*)
 config/     config.php (reads .env)
-migrations/ 001_schema.sql (required), 002_seed_demo.sql (optional demo articles)
+migrations/ 001_schema.sql (baseline, required), 002_seed_demo.sql (optional demo articles),
+            further numbered files as the schema evolves — see "Schema migrations" below
 bin/        setup.php (CLI setup)
 ```
 
@@ -66,6 +67,42 @@ CREATE DATABASE kassen_app CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE USER 'kassen'@'localhost' IDENTIFIED BY 'yourpassword';
 GRANT ALL PRIVILEGES ON kassen_app.* TO 'kassen'@'localhost';
 ```
+
+## Schema migrations
+
+Every schema change after the baseline (`001_schema.sql`) ships as a new numbered file in
+`migrations/`. You don't need to run these by hand:
+
+- **With SSH**: `php bin/setup.php` (with or without the code flags) re-applies every non-seed
+  migration file it finds, in order. Safe to run repeatedly — each file uses
+  `CREATE TABLE IF NOT EXISTS` / `INSERT IGNORE` / `ADD COLUMN IF NOT EXISTS`.
+- **Without SSH**: no action needed. `Migrator` (`src/Migrator.php`) checks a `schema_version` row
+  in `settings` on every API request and applies whatever's missing before handling it — so
+  uploading new files through a web file manager and then just loading the page is the entire
+  deployment step, migrations included. It's a one-line class to extend: add the next
+  `version => filename` pair to `Migrator::MIGRATIONS` when you ship a new migration file.
+
+## Artikelgruppen & Lagerbestand pro Artikel
+
+Added after the initial handoff, at the operator's request: article groups became a managed
+entity instead of free-text, and stock tracking moved from a single global on/off to a per-article
+setting (a festival typically has items like draft beer that are never counted alongside items
+like a limited print run of 100 T-shirts that must be).
+
+- **Artikelgruppen tab** now has a "Gruppen verwalten" panel: create/rename/delete groups, and a
+  per-group default for whether new articles in it track stock. Deleting a group is blocked while
+  any article still references it (reassign or delete those first — `CategoryRepo::delete()`).
+- **Article form**: category is now a `<select>` populated from `GET /api/categories`, not free
+  text — `POST/PATCH /api/products` reject any category that isn't a real group
+  (`Api::resolveCategory()`). A per-article "Lagerbestand für diesen Artikel führen" toggle appears
+  next to it (only when the global Einstellungen toggle is on); picking a group prefills it from
+  that group's default, then it's freely overridable per article.
+- **Everywhere stock-related** (POS badges/blocking, Bestand tab, Artikel tab's Bestand column,
+  checkout's stock deduction, the KPI/low-stock/Lagerwert aggregates) now checks both the global
+  `settings.track_stock` flag *and* the individual `products.track_stock` flag — both must be on
+  for an article to be treated as tracked. An untracked article behaves as it always could be sold
+  without limit, no badge, excluded from Bestand and stock-value figures, same as when the global
+  toggle used to be the only switch.
 
 ## What differs from the Claude Design prototype (and why)
 

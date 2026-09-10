@@ -5,6 +5,7 @@ namespace Festkasse;
 
 use Festkasse\Repo\AuditRepo;
 use Festkasse\Repo\CashRepo;
+use Festkasse\Repo\CategoryRepo;
 use Festkasse\Repo\JournalRepo;
 use Festkasse\Repo\MaintenanceRepo;
 use Festkasse\Repo\ProductRepo;
@@ -19,6 +20,7 @@ final class Api
     private Auth $auth;
     private SettingsRepo $settings;
     private ProductRepo $products;
+    private CategoryRepo $categories;
     private CashRepo $cash;
     private SaleRepo $sales;
     private ZReportRepo $zReports;
@@ -32,6 +34,7 @@ final class Api
         $this->auth = new Auth($db, $https);
         $this->settings = new SettingsRepo($db);
         $this->products = new ProductRepo($db);
+        $this->categories = new CategoryRepo($db);
         $this->cash = new CashRepo($db);
         $this->sales = new SaleRepo($db, $this->products, $this->cash);
         $this->zReports = new ZReportRepo($db, $this->cash);
@@ -90,6 +93,39 @@ final class Api
         if ($method === 'GET' && $path === '/api/admin/products') {
             $this->auth->requireAccess();
             return $this->adminProducts();
+        }
+
+        if ($path === '/api/categories') {
+            if ($method === 'GET') {
+                $this->auth->requireAccess();
+                return $this->categories->list();
+            }
+            if ($method === 'POST') {
+                $this->auth->requireAccess();
+                $b = Support::jsonBody();
+                $id = $this->categories->create((string) ($b['name'] ?? ''), (bool) ($b['trackStockDefault'] ?? true));
+                return ['id' => $id];
+            }
+        }
+
+        if (preg_match('#^/api/categories/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            if ($method === 'PATCH') {
+                $this->auth->requireAccess();
+                $b = Support::jsonBody();
+                if (array_key_exists('name', $b)) {
+                    $this->categories->rename($id, (string) $b['name']);
+                }
+                if (array_key_exists('trackStockDefault', $b)) {
+                    $this->categories->setTrackStockDefault($id, (bool) $b['trackStockDefault']);
+                }
+                return ['ok' => true];
+            }
+            if ($method === 'DELETE') {
+                $this->auth->requireAccess();
+                $this->categories->delete($id);
+                return ['ok' => true];
+            }
         }
 
         if ($method === 'POST' && $path === '/api/products') {
@@ -189,6 +225,7 @@ final class Api
             'priceCents' => (int) $p['price_cents'],
             'stock' => (int) $p['stock'],
             'stockMin' => (int) $p['stock_min'],
+            'trackStock' => (bool) $p['track_stock'],
         ], $this->products->listActive());
 
         $today = (int) $this->db->query(
@@ -215,9 +252,24 @@ final class Api
             'costCents' => (int) $p['cost_cents'],
             'stock' => (int) $p['stock'],
             'stockMin' => (int) $p['stock_min'],
+            'trackStock' => (bool) $p['track_stock'],
             'soldQty' => (int) $p['sold_qty'],
             'soldRevenueCents' => (int) $p['sold_revenue_cents'],
         ], $this->products->listActive());
+    }
+
+    /** Category must already exist as a managed group — no more free-text categories from the article form. */
+    private function resolveCategory(string $name): array
+    {
+        $name = trim($name);
+        if ($name === '') {
+            throw new ApiException(400, 'Artikelgruppe fehlt');
+        }
+        $category = $this->categories->findByName($name);
+        if ($category === null) {
+            throw new ApiException(400, 'Unbekannte Artikelgruppe · bitte zuerst unter Artikelgruppen anlegen');
+        }
+        return $category;
     }
 
     private function createProduct(): array
@@ -231,13 +283,16 @@ final class Api
         if ($price <= 0) {
             throw new ApiException(400, 'Verkaufspreis fehlt');
         }
+        $category = $this->resolveCategory((string) ($b['category'] ?? ''));
+        $trackStock = array_key_exists('trackStock', $b) ? (bool) $b['trackStock'] : (bool) $category['track_stock_default'];
         $id = $this->products->create(
             $name,
-            trim((string) ($b['category'] ?? '')) ?: 'Speisen',
+            $category['name'],
             $price,
             (int) ($b['costCents'] ?? 0),
             (int) ($b['stock'] ?? 0),
-            (int) ($b['stockMin'] ?? 10)
+            (int) ($b['stockMin'] ?? 10),
+            $trackStock
         );
         return ['id' => $id];
     }
@@ -253,14 +308,16 @@ final class Api
         if ($price <= 0) {
             throw new ApiException(400, 'Verkaufspreis fehlt');
         }
+        $category = $this->resolveCategory((string) ($b['category'] ?? ''));
         $this->products->update(
             $id,
             $name,
-            trim((string) ($b['category'] ?? '')) ?: 'Speisen',
+            $category['name'],
             $price,
             (int) ($b['costCents'] ?? 0),
             array_key_exists('stock', $b) ? (int) $b['stock'] : null,
-            array_key_exists('stockMin', $b) ? (int) $b['stockMin'] : null
+            array_key_exists('stockMin', $b) ? (int) $b['stockMin'] : null,
+            array_key_exists('trackStock', $b) ? (bool) $b['trackStock'] : null
         );
         return ['ok' => true];
     }

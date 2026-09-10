@@ -44,15 +44,17 @@ final class SaleRepo
             $costCents = 0;
             $name = (string) $item['name'];
             $productId = $item['productId'] !== null ? (int) $item['productId'] : null;
+            $productTracksStock = true;
             if ($productId !== null) {
                 $product = $this->products->find($productId);
                 if ($product !== null) {
                     $costCents = (int) $product['cost_cents'];
                     $name = $name !== '' ? $name : (string) $product['name'];
+                    $productTracksStock = (bool) $product['track_stock'];
                 }
             }
             $subtotal += $unitCents * $qty;
-            $resolved[] = ['productId' => $productId, 'name' => $name, 'unitCents' => $unitCents, 'costCents' => $costCents, 'qty' => $qty];
+            $resolved[] = ['productId' => $productId, 'name' => $name, 'unitCents' => $unitCents, 'costCents' => $costCents, 'qty' => $qty, 'trackStock' => $productTracksStock];
         }
 
         $discount = max(0, min($discountCents, $subtotal));
@@ -81,7 +83,7 @@ final class SaleRepo
             );
             foreach ($resolved as $r) {
                 $itemStmt->execute([$saleId, $r['productId'], $r['name'], $r['unitCents'], $r['costCents'], $r['qty']]);
-                if ($trackStock && $r['productId'] !== null) {
+                if ($trackStock && $r['trackStock'] && $r['productId'] !== null) {
                     $this->products->deductStock($r['productId'], $r['qty']);
                 }
             }

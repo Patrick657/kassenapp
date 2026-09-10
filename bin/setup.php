@@ -14,7 +14,15 @@ $opts = getopt('', ['access-code:', 'delete-code:', 'demo']);
 $db = Db::get();
 
 echo "Wende Migrationen an…\n";
-$db->exec(file_get_contents(__DIR__ . '/../migrations/001_schema.sql'));
+$migrationFiles = glob(__DIR__ . '/../migrations/*.sql') ?: [];
+sort($migrationFiles);
+foreach ($migrationFiles as $file) {
+    if (str_contains(basename($file), 'seed')) {
+        continue; // seed files are opt-in via --demo below, not part of the schema
+    }
+    echo '  - ' . basename($file) . "\n";
+    $db->exec(file_get_contents($file));
+}
 
 if (isset($opts['demo'])) {
     $existing = (int) $db->query('SELECT COUNT(*) FROM products')->fetchColumn();

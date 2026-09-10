@@ -98,7 +98,7 @@ const state = {
   toast: '',
   clock: '',
 
-  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null },
+  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null },
 };
 
 let toastTimer = null;
@@ -160,7 +160,7 @@ async function guardedAdminCall(fn) {
 function findProduct(id) { return state.products.find((p) => p.id === id); }
 
 function addToCart(product) {
-  const track = state.settings.trackStock;
+  const track = state.settings.trackStock && product.trackStock;
   if (track && product.stock <= 0) return showToast(product.name + ' ist ausverkauft');
   const line = state.cart.find((l) => l.productId === product.id);
   if (line) {
@@ -266,20 +266,39 @@ async function submitForm() {
       closeForm();
       return;
     }
+    if (f.kind === 'category') {
+      const name = (f.name || '').trim();
+      if (!name) return setFormError('Name fehlt');
+      if (f.id) {
+        await guardedAdminCall(() => api('/categories/' + f.id, { method: 'PATCH', body: { name } }));
+        showToast('Gruppe umbenannt');
+      } else {
+        await guardedAdminCall(() => api('/categories', { method: 'POST', body: { name, trackStockDefault: !!f.trackStockDefault } }));
+        showToast('Gruppe angelegt');
+      }
+      closeForm();
+      await loadGroups();
+      renderMain();
+      return;
+    }
     if (f.kind === 'article') {
       const name = (f.name || '').trim();
       if (!name) return setFormError('Name fehlt');
       const price = toCents(f.price);
       if (price <= 0) return setFormError('Verkaufspreis fehlt');
+      if (!f.category) return setFormError('Artikelgruppe fehlt');
       const body = {
         name,
-        category: (f.category || '').trim() || 'Speisen',
+        category: f.category,
         priceCents: price,
         costCents: toCents(f.cost || '0'),
       };
       if (state.settings.trackStock) {
-        body.stock = Math.round(parseAmount(f.stock || '0'));
-        body.stockMin = Math.round(parseAmount(f.stockMin || '0'));
+        body.trackStock = !!f.trackStock;
+        if (f.trackStock) {
+          body.stock = Math.round(parseAmount(f.stock || '0'));
+          body.stockMin = Math.round(parseAmount(f.stockMin || '0'));
+        }
       }
       await guardedAdminCall(() => (f.id ? api('/products/' + f.id, { method: 'PATCH', body }) : api('/products', { method: 'POST', body })));
       closeForm();
@@ -331,8 +350,14 @@ async function loadOverview() {
   Object.assign(state.admin, { kpis, daily, hourly, ranking, payments });
 }
 async function loadGroups() {
-  const data = await guardedAdminCall(() => api('/reports/groups'));
-  if (data) state.admin.groups = data;
+  const [groups, categories] = await guardedAdminCall(() => Promise.all([api('/reports/groups'), api('/categories')])) || [null, null];
+  if (groups) state.admin.groups = groups;
+  if (categories) state.admin.categories = categories;
+}
+async function loadCategories() {
+  const data = await guardedAdminCall(() => api('/categories'));
+  if (data) state.admin.categories = data;
+  return data;
 }
 async function loadJournal(before) {
   const data = await guardedAdminCall(() => api('/journal' + (before ? '?before=' + before + '&limit=80' : '?limit=80')));
@@ -355,7 +380,7 @@ async function enterAdminTab(tab) {
   renderMain();
   if (tab === 'overview') await loadOverview();
   else if (tab === 'groups') await loadGroups();
-  else if (tab === 'articles' || tab === 'stock') await loadAdminProducts();
+  else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
   else if (tab === 'cash') await loadCashStatus();
   else if (tab === 'settings') await loadMaintenanceCounts();
@@ -450,10 +475,11 @@ function renderPos() {
   const cartCount = state.cart.reduce((a, l) => a + l.qty, 0);
 
   const tiles = visible.map((p) => {
-    const out = showStock && p.stock <= 0;
-    const low = showStock && p.stock <= p.stockMin;
+    const tracked = showStock && p.trackStock;
+    const out = tracked && p.stock <= 0;
+    const low = tracked && p.stock <= p.stockMin;
     let badge = '';
-    if (showStock) {
+    if (tracked) {
       const cls = out ? 'out' : low ? 'low' : '';
       badge = `<span class="tile-badge mono ${cls}">${out ? 'leer' : p.stock}</span>`;
     }
@@ -600,8 +626,24 @@ function renderOverviewTab() {
 
 function renderGroupsTab() {
   const groups = state.admin.groups;
-  if (!groups) return '<p>Lädt…</p>';
-  return groups.map((g) => `
+  const cats = state.admin.categories;
+  if (!groups || !cats) return '<p>Lädt…</p>';
+  const manage = `
+    <div class="card-box">
+      <div class="table-head-row" style="padding:0 0 12px">
+        <div><div class="title">Gruppen verwalten</div><div class="subtitle">${cats.length} Artikelgruppe(n)</div></div>
+        <button data-action="new-category" class="btn-primary">+ Neue Gruppe</button>
+      </div>
+      ${cats.map((c) => `<div class="settings-row" data-action="toggle-category-default" data-id="${c.id}">
+        <div><div class="title">${esc(c.name)}</div><div class="hint">Lagerbestand für neue Artikel dieser Gruppe</div></div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <div class="switch-track ${c.trackStockDefault ? 'on' : ''}"><div class="switch-knob"></div></div>
+          <button data-action="rename-category" data-id="${c.id}">Umbenennen</button>
+          <button data-action="delete-category" data-id="${c.id}" data-name="${esc(c.name)}" class="del">✕</button>
+        </div>
+      </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch keine Artikelgruppe angelegt.</div>'}
+    </div>`;
+  return manage + groups.map((g) => `
     <div class="group-card">
       <div class="group-head" data-action="show-group" data-name="${esc(g.name)}"><span class="name">${esc(g.name)}</span><span class="revenue mono">${eur(g.revenueCents)}</span></div>
       <div class="group-sub">${g.sharePct}% vom Gesamtumsatz · ${g.qty}× verkauft · ${g.count} Artikel</div>
@@ -628,14 +670,15 @@ function renderArticlesTab() {
   const showStock = state.settings.trackStock;
   const rowsHtml = filtered.map((p) => {
     const margin = p.priceCents ? Math.round((p.priceCents - p.costCents) / p.priceCents * 100) + '%' : '–';
-    const stockColor = !showStock ? 'var(--text-4)' : p.stock <= 0 ? 'var(--err-text)' : p.stock <= p.stockMin ? 'var(--warn-text)' : 'var(--ink)';
+    const tracked = showStock && p.trackStock;
+    const stockColor = !tracked ? 'var(--text-4)' : p.stock <= 0 ? 'var(--err-text)' : p.stock <= p.stockMin ? 'var(--warn-text)' : 'var(--ink)';
     return `<div class="article-row ${state.focusProduct === p.id ? 'focused' : ''}" id="artikel-${p.id}">
       <span>${esc(p.name)}</span>
       <span class="link" data-action="filter-category" data-cat="${esc(p.category)}">${esc(p.category)}</span>
       <span class="num mono">${eur(p.priceCents)}</span>
       <span class="num mono">${eur(p.costCents)}</span>
       <span class="num mono margin-val">${margin}</span>
-      <span class="num mono" style="color:${stockColor}">${showStock ? p.stock : '–'}</span>
+      <span class="num mono" style="color:${stockColor}">${tracked ? p.stock : '–'}</span>
       <span class="num mono">${p.soldQty ? p.soldQty + '×' : '–'}</span>
       <div class="row-actions">
         <button data-action="edit-article" data-id="${p.id}">Bearbeiten</button>
@@ -658,8 +701,9 @@ function renderArticlesTab() {
 }
 
 function renderStockTab() {
-  const rows = state.admin.products;
-  if (!rows) return '<p>Lädt…</p>';
+  const all = state.admin.products;
+  if (!all) return '<p>Lädt…</p>';
+  const rows = all.filter((p) => p.trackStock);
   const low = rows.filter((p) => p.stock <= p.stockMin);
   const stockValue = rows.reduce((a, p) => a + p.stock * p.costCents, 0);
   const stockRows = rows.map((p) => {
@@ -678,8 +722,8 @@ function renderStockTab() {
   return `
     ${low.length ? `<div class="banner-warn"><div class="title">Niedriger Bestand</div><div class="list">${low.map((p) => esc(p.name) + ' (' + p.stock + ' / ' + p.stockMin + ')').join(' · ')}</div></div>` : ''}
     <div class="card-box stock-card">
-      <div class="table-head-row" style="padding:0 0 12px"><div><div class="title">Bestand &amp; Warenzugang</div><div class="subtitle">Lagerwert (EK): ${eur(stockValue)}</div></div></div>
-      ${stockRows}
+      <div class="table-head-row" style="padding:0 0 12px"><div><div class="title">Bestand &amp; Warenzugang</div><div class="subtitle">Lagerwert (EK): ${eur(stockValue)}${all.length > rows.length ? ' · ' + (all.length - rows.length) + ' Artikel ohne Lagerverwaltung ausgeblendet' : ''}</div></div></div>
+      ${stockRows || '<div style="padding:16px 18px;color:var(--text-3);font-size:13px">Kein Artikel mit aktiver Lagerverwaltung.</div>'}
     </div>`;
 }
 
@@ -845,8 +889,8 @@ function renderFormOverlay() {
   let title = '', hint = '', fields = '', submitLabel = 'Speichern', dangerSubmit = false;
   if (f.kind === 'confirm') {
     title = f.title;
-    hint = f.hint + ' Zum Bestätigen das Löschkennwort eingeben.';
-    fields = F('Löschkennwort', 'code', '••••', 'password');
+    hint = f.hint + (f.noCode ? '' : ' Zum Bestätigen das Löschkennwort eingeben.');
+    fields = f.noCode ? '' : F('Löschkennwort', 'code', '••••', 'password');
     submitLabel = f.submitLabel || 'Endgültig löschen';
     dangerSubmit = true;
   } else if (f.kind === 'price') {
@@ -855,8 +899,31 @@ function renderFormOverlay() {
     submitLabel = 'Übernehmen';
   } else if (f.kind === 'article') {
     title = f.id ? 'Artikel bearbeiten' : 'Neuer Artikel';
-    fields = F('Bezeichnung', 'name', 'z.B. Bratwurst') + F('Kategorie', 'category', 'Speisen / Getränke / Süßes') + F('Verkaufspreis (€)', 'price', '3,50') + F('Einkaufspreis (€)', 'cost', '1,20');
-    if (state.settings.trackStock) fields += F('Bestand', 'stock', '100') + F('Meldebestand', 'stockMin', '20');
+    const cats = state.admin.categories || [];
+    const catOptions = cats.length
+      ? cats.map((c) => `<option value="${esc(c.name)}" ${f.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')
+      : '<option value="">Keine Artikelgruppe angelegt</option>';
+    fields = F('Bezeichnung', 'name', 'z.B. Bratwurst');
+    fields += `<div class="form-field"><label>Artikelgruppe</label><select data-form-key="category" ${cats.length ? '' : 'disabled'}>${catOptions}</select></div>`;
+    fields += F('Verkaufspreis (€)', 'price', '3,50') + F('Einkaufspreis (€)', 'cost', '1,20');
+    if (state.settings.trackStock) {
+      fields += `<div class="settings-row" data-action="toggle-form-trackstock" style="padding:12px 0;cursor:pointer">
+        <div><div class="title" style="font-size:13px;font-weight:600">Lagerbestand für diesen Artikel führen</div><div class="hint" style="font-size:11px;color:var(--text-3)">Aus, wenn dieser Artikel nicht gezählt werden soll (z. B. Fassbier)</div></div>
+        <div class="switch-track ${f.trackStock ? 'on' : ''}"><div class="switch-knob"></div></div>
+      </div>`;
+      if (f.trackStock) fields += F('Bestand', 'stock', '100') + F('Meldebestand', 'stockMin', '20');
+    }
+    if (!cats.length) hint = 'Erst unter "Artikelgruppen" mindestens eine Gruppe anlegen, bevor du einen Artikel speichern kannst.';
+  } else if (f.kind === 'category') {
+    title = f.id ? 'Gruppe umbenennen' : 'Neue Artikelgruppe';
+    fields = F('Name', 'name', 'z. B. Merchandise');
+    if (!f.id) {
+      fields += `<div class="settings-row" data-action="toggle-form-trackstockdefault" style="padding:12px 0;cursor:pointer">
+        <div><div class="title" style="font-size:13px;font-weight:600">Lagerbestand für neue Artikel dieser Gruppe</div><div class="hint" style="font-size:11px;color:var(--text-3)">Vorbelegung, pro Artikel jederzeit änderbar</div></div>
+        <div class="switch-track ${f.trackStockDefault ? 'on' : ''}"><div class="switch-knob"></div></div>
+      </div>`;
+    }
+    submitLabel = f.id ? 'Speichern' : 'Anlegen';
   } else if (f.kind === 'delivery') {
     title = 'Warenzugang · ' + f.name;
     fields = F('Menge', 'qty', '50') + F('Notiz / Lieferant', 'note', 'z.B. Metro');
@@ -902,7 +969,15 @@ function renderOverlay() {
 
   if (state.form) {
     el.querySelectorAll('[data-form-key]').forEach((input) => {
-      input.addEventListener('input', () => { state.form[input.dataset.formKey] = input.value; });
+      const evt = input.tagName === 'SELECT' ? 'change' : 'input';
+      input.addEventListener(evt, () => {
+        state.form[input.dataset.formKey] = input.value;
+        // New article: prefill the per-article stock toggle from the chosen group's default.
+        if (input.dataset.formKey === 'category' && state.form.kind === 'article' && !state.form.id) {
+          const cat = (state.admin.categories || []).find((c) => c.name === input.value);
+          if (cat) { state.form.trackStock = cat.trackStockDefault; renderOverlay(); }
+        }
+      });
     });
   }
   if (state.receipt) {
@@ -967,13 +1042,44 @@ function onAction(e) {
       return void enterAdminTab('articles').then(() => { state.focusProduct = id; renderMain(); });
     }
     case 'show-group': state.adminTab = 'articles'; state.catFilter = d.name; state.focusProduct = null; return void enterAdminTab('articles');
-    case 'new-article': return openForm(state.settings.trackStock ? { kind: 'article', name: '', category: '', price: '', cost: '', stock: '0', stockMin: '10' } : { kind: 'article', name: '', category: '', price: '', cost: '' });
+    case 'new-category': return openForm({ kind: 'category', name: '', trackStockDefault: true });
+    case 'rename-category': {
+      const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
+      return openForm({ kind: 'category', id: c.id, name: c.name });
+    }
+    case 'toggle-category-default': {
+      const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
+      return void guardedAdminCall(() => api('/categories/' + c.id, { method: 'PATCH', body: { trackStockDefault: !c.trackStockDefault } }))
+        .then(() => loadGroups())
+        .then(renderMain)
+        .catch((e) => showToast(e.message));
+    }
+    case 'delete-category': return openForm({
+      kind: 'confirm', noCode: true, title: 'Gruppe löschen · ' + d.name,
+      hint: 'Nur möglich, solange kein Artikel mehr dieser Gruppe zugeordnet ist.',
+      submitLabel: 'Gruppe löschen',
+      action: async () => {
+        await api('/categories/' + d.id, { method: 'DELETE' });
+        showToast('Gruppe gelöscht');
+        await loadGroups();
+        renderMain();
+      },
+    });
+    case 'toggle-form-trackstockdefault': state.form.trackStockDefault = !state.form.trackStockDefault; return renderOverlay();
+    case 'new-article': {
+      const cats = state.admin.categories || [];
+      const defaultCat = cats[0];
+      const f = { kind: 'article', name: '', category: defaultCat ? defaultCat.name : '', price: '', cost: '' };
+      if (state.settings.trackStock) { f.trackStock = defaultCat ? defaultCat.trackStockDefault : true; f.stock = '0'; f.stockMin = '10'; }
+      return openForm(f);
+    }
     case 'edit-article': {
       const p = state.admin.products.find((x) => x.id === Number(d.id));
       const f = { kind: 'article', id: p.id, name: p.name, category: p.category, price: String(p.priceCents / 100).replace('.', ','), cost: String(p.costCents / 100).replace('.', ',') };
-      if (state.settings.trackStock) { f.stock = String(p.stock); f.stockMin = String(p.stockMin); }
+      if (state.settings.trackStock) { f.trackStock = p.trackStock; f.stock = String(p.stock); f.stockMin = String(p.stockMin); }
       return openForm(f);
     }
+    case 'toggle-form-trackstock': state.form.trackStock = !state.form.trackStock; return renderOverlay();
     case 'remove-article': {
       const p = state.admin.products.find((x) => x.id === Number(d.id));
       return openForm({
