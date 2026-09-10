@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 2;
+    private const LATEST_VERSION = 3;
 
     public function __construct(private readonly PDO $db)
     {
@@ -32,6 +32,10 @@ final class Migrator
         if ($current < 2) {
             $this->migrateToV2();
             $this->setVersion(2);
+        }
+        if ($current < 3) {
+            $this->migrateToV3();
+            $this->setVersion(3);
         }
     }
 
@@ -46,6 +50,16 @@ final class Migrator
             'products',
             'track_stock',
             'ALTER TABLE products ADD COLUMN track_stock TINYINT(1) NOT NULL DEFAULT 1 AFTER stock_min'
+        );
+    }
+
+    /** Optional article number (SKU), free text, no uniqueness constraint. */
+    private function migrateToV3(): void
+    {
+        $this->ensureColumn(
+            'products',
+            'sku',
+            'ALTER TABLE products ADD COLUMN sku VARCHAR(60) NULL AFTER name'
         );
     }
 

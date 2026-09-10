@@ -95,6 +95,16 @@ final class Api
             return $this->adminProducts();
         }
 
+        if ($method === 'GET' && $path === '/api/products/export') {
+            $this->auth->requireAccess();
+            $this->exportProductsCsv();
+        }
+
+        if ($method === 'POST' && $path === '/api/products/import') {
+            $this->auth->requireAccess();
+            return $this->importProductsCsv();
+        }
+
         if ($path === '/api/categories') {
             if ($method === 'GET') {
                 $this->auth->requireAccess();
@@ -247,6 +257,7 @@ final class Api
         return array_map(static fn ($p) => [
             'id' => (int) $p['id'],
             'name' => $p['name'],
+            'sku' => $p['sku'] ?? null,
             'category' => $p['category'],
             'priceCents' => (int) $p['price_cents'],
             'costCents' => (int) $p['cost_cents'],
@@ -256,6 +267,127 @@ final class Api
             'soldQty' => (int) $p['sold_qty'],
             'soldRevenueCents' => (int) $p['sold_revenue_cents'],
         ], $this->products->listActive());
+    }
+
+    private const CSV_HEADER = ['Artikelnummer', 'Name', 'Gruppe', 'Verkaufspreis', 'Einkaufspreis', 'Lagerbestand_fuehren', 'Bestand', 'Meldebestand'];
+
+    private function exportProductsCsv(): never
+    {
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="artikel-' . date('Y-m-d') . '.csv"');
+        echo "\xEF\xBB\xBF"; // UTF-8 BOM so Excel picks the right encoding instead of guessing Latin-1
+        $out = fopen('php://output', 'w');
+        fputcsv($out, self::CSV_HEADER, ';');
+        foreach ($this->products->listActive() as $p) {
+            fputcsv($out, [
+                $p['sku'] ?? '',
+                $p['name'],
+                $p['category'],
+                number_format(((int) $p['price_cents']) / 100, 2, ',', ''),
+                number_format(((int) $p['cost_cents']) / 100, 2, ',', ''),
+                ((bool) $p['track_stock']) ? 'ja' : 'nein',
+                (string) (int) $p['stock'],
+                (string) (int) $p['stock_min'],
+            ], ';');
+        }
+        fclose($out);
+        exit;
+    }
+
+    /**
+     * Upserts articles from a semicolon- or comma-delimited CSV (same columns as the export).
+     * Matches existing articles by Artikelnummer first, then falls back to an exact name match;
+     * anything else becomes a new article. Unknown groups are created on the fly (using the row's
+     * own Lagerbestand_fuehren value as that new group's default) rather than failing the row —
+     * partial success beats an all-or-nothing import when someone's editing a spreadsheet by hand.
+     */
+    private function importProductsCsv(): array
+    {
+        $raw = file_get_contents('php://input') ?: '';
+        $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw) ?? $raw;
+        $lines = array_values(array_filter(preg_split('/\r\n|\r|\n/', trim($raw)), static fn ($l) => trim($l) !== ''));
+        if (count($lines) < 2) {
+            throw new ApiException(400, 'Keine Datenzeilen in der Datei gefunden');
+        }
+        $header = array_shift($lines);
+        $delimiter = substr_count($header, ';') >= substr_count($header, ',') ? ';' : ',';
+
+        $existing = $this->products->listActive();
+        $bySku = [];
+        $byName = [];
+        foreach ($existing as $p) {
+            if (!empty($p['sku'])) {
+                $bySku[$p['sku']] = $p;
+            }
+            $byName[mb_strtolower($p['name'])] = $p;
+        }
+
+        $created = 0;
+        $updated = 0;
+        $errors = [];
+
+        foreach ($lines as $i => $line) {
+            $rowNum = $i + 2; // header is row 1
+            $cols = array_pad(str_getcsv($line, $delimiter), 8, '');
+            [$sku, $name, $groupName, $priceRaw, $costRaw, $trackRaw, $stockRaw, $stockMinRaw] = $cols;
+
+            $sku = trim($sku);
+            $name = trim($name);
+            $groupName = trim($groupName);
+            $priceCents = Support::parseAmountToCents($priceRaw);
+
+            if ($name === '') {
+                $errors[] = ['row' => $rowNum, 'message' => 'Name fehlt'];
+                continue;
+            }
+            if ($priceCents <= 0) {
+                $errors[] = ['row' => $rowNum, 'message' => 'Verkaufspreis fehlt oder ungültig'];
+                continue;
+            }
+            if ($groupName === '') {
+                $errors[] = ['row' => $rowNum, 'message' => 'Artikelgruppe fehlt'];
+                continue;
+            }
+
+            $trackRawTrim = mb_strtolower(trim($trackRaw));
+            $trackStock = $trackRawTrim === '' || in_array($trackRawTrim, ['ja', 'yes', 'true', '1'], true);
+
+            $category = $this->categories->findByName($groupName);
+            if ($category === null) {
+                try {
+                    $this->categories->create($groupName, $trackStock);
+                } catch (ApiException $e) {
+                    // race with another row of the same import naming the same new group — fine, re-fetch
+                }
+                $category = $this->categories->findByName($groupName);
+            }
+
+            $costCents = Support::parseAmountToCents($costRaw);
+            $stock = (int) round(Support::parseGermanDecimal($stockRaw));
+            $stockMin = $stockRaw === '' ? 10 : (int) round(Support::parseGermanDecimal($stockMinRaw));
+
+            $match = ($sku !== '' && isset($bySku[$sku])) ? $bySku[$sku] : ($byName[mb_strtolower($name)] ?? null);
+
+            if ($match) {
+                $this->products->update(
+                    (int) $match['id'],
+                    $name,
+                    $category['name'],
+                    $priceCents,
+                    $costCents,
+                    $stock,
+                    $stockMin,
+                    $trackStock,
+                    $sku !== '' ? $sku : null
+                );
+                $updated++;
+            } else {
+                $this->products->create($name, $category['name'], $priceCents, $costCents, $stock, $stockMin, $trackStock, $sku !== '' ? $sku : null);
+                $created++;
+            }
+        }
+
+        return ['created' => $created, 'updated' => $updated, 'errors' => $errors];
     }
 
     /** Category must already exist as a managed group — no more free-text categories from the article form. */
@@ -292,9 +424,16 @@ final class Api
             (int) ($b['costCents'] ?? 0),
             (int) ($b['stock'] ?? 0),
             (int) ($b['stockMin'] ?? 10),
-            $trackStock
+            $trackStock,
+            self::normalizeSku($b['sku'] ?? null)
         );
         return ['id' => $id];
+    }
+
+    private static function normalizeSku(mixed $sku): ?string
+    {
+        $sku = trim((string) $sku);
+        return $sku === '' ? null : $sku;
     }
 
     private function updateProduct(int $id): array
@@ -317,7 +456,8 @@ final class Api
             (int) ($b['costCents'] ?? 0),
             array_key_exists('stock', $b) ? (int) $b['stock'] : null,
             array_key_exists('stockMin', $b) ? (int) $b['stockMin'] : null,
-            array_key_exists('trackStock', $b) ? (bool) $b['trackStock'] : null
+            array_key_exists('trackStock', $b) ? (bool) $b['trackStock'] : null,
+            self::normalizeSku($b['sku'] ?? null)
         );
         return ['ok' => true];
     }

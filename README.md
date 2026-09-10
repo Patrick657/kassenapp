@@ -96,9 +96,12 @@ entity instead of free-text, and stock tracking moved from a single global on/of
 setting (a festival typically has items like draft beer that are never counted alongside items
 like a limited print run of 100 T-shirts that must be).
 
-- **Artikelgruppen tab** now has a "Gruppen verwalten" panel: create/rename/delete groups, and a
-  per-group default for whether new articles in it track stock. Deleting a group is blocked while
-  any article still references it (reassign or delete those first — `CategoryRepo::delete()`).
+- **Artikelgruppen tab** manages groups: create/rename/delete, name + article count per group, and
+  a per-group default for whether new articles in it track stock. Deleting a group is blocked while
+  any article still references it (reassign or delete those first — `CategoryRepo::delete()`). The
+  per-group *revenue* analysis (previously mixed into this same tab) now lives in its own
+  **Auswertungen** tab — structural management and sales analysis were two different jobs sharing
+  one screen, split apart at the operator's request.
 - **Article form**: category is now a `<select>` populated from `GET /api/categories`, not free
   text — `POST/PATCH /api/products` reject any category that isn't a real group
   (`Api::resolveCategory()`). A per-article "Lagerbestand für diesen Artikel führen" toggle appears
@@ -110,6 +113,37 @@ like a limited print run of 100 T-shirts that must be).
   for an article to be treated as tracked. An untracked article behaves as it always could be sold
   without limit, no badge, excluded from Bestand and stock-value figures, same as when the global
   toggle used to be the only switch.
+
+## Artikelnummer (SKU) und CSV Export/Import
+
+Optional `sku` field per article (migration v3, `products.sku VARCHAR(60) NULL`, no uniqueness
+constraint) — shown as a small subtitle under the article name in the Artikel tab, and as an
+optional field in the article form.
+
+- **`GET /api/products/export`** (protected) streams a semicolon-delimited CSV of all active
+  articles — UTF-8 BOM so Excel picks the encoding up correctly, German decimal commas for prices,
+  `ja`/`nein` for stock tracking. Columns: `Artikelnummer;Name;Gruppe;Verkaufspreis;Einkaufspreis;
+  Lagerbestand_fuehren;Bestand;Meldebestand`.
+- **`POST /api/products/import`** (protected) takes that same CSV back as the raw request body
+  (not multipart — the frontend reads the file client-side and POSTs its text). Matches existing
+  articles by Artikelnummer first, then by exact name, otherwise creates a new one; unknown groups
+  are created on the fly using the row's own Lagerbestand_fuehren value as that new group's
+  default. Bad rows (missing name/price/group) are skipped and reported individually rather than
+  failing the whole import — returns `{created, updated, errors: [{row, message}]}`.
+- Chose plain CSV over a real `.xlsx` library deliberately: this deploys via FTP with no build
+  step and sometimes no SSH at all, and PHP's `fputcsv`/`str_getcsv` need zero dependencies. Excel
+  opens/edits/saves the file natively either way.
+
+## Responsive layout (tablet portrait / iPad)
+
+The two-column POS view (tile grid + 430px cart) only works down to ~900px wide. Below that
+(`.pos { flex-direction: column }`) the cart is capped at `62dvh` instead of being a free `flex: 1`
+— without a cap, a tall tile grid could squeeze the cart's own totals/payment/checkout footer
+below the visible area with no way to scroll to them, which is exactly what "kann unten nicht
+abschließen" on an iPad turned out to be. The cart's own line-item list still scrolls internally
+within that capped height; the footer stays pinned below it. Also switched `100vh`→`100dvh`
+(`#app`, modal `max-height`s) throughout, since plain `vh` is fixed to the tallest possible
+viewport and doesn't account for mobile Safari's collapsing address bar.
 
 ## What differs from the Claude Design prototype (and why)
 

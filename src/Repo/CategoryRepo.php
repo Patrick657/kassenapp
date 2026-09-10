@@ -14,12 +14,19 @@ final class CategoryRepo
 
     public function list(): array
     {
-        $rows = $this->db->query('SELECT * FROM categories ORDER BY sort_order ASC, name ASC')->fetchAll();
+        $sql = "SELECT c.*, COALESCE(p.cnt, 0) AS product_count
+                FROM categories c
+                LEFT JOIN (
+                    SELECT category, COUNT(*) AS cnt FROM products WHERE archived_at IS NULL GROUP BY category
+                ) p ON p.category = c.name
+                ORDER BY c.sort_order ASC, c.name ASC";
+        $rows = $this->db->query($sql)->fetchAll();
         return array_map(static fn ($r) => [
             'id' => (int) $r['id'],
             'name' => $r['name'],
             'sortOrder' => (int) $r['sort_order'],
             'trackStockDefault' => (bool) $r['track_stock_default'],
+            'productCount' => (int) $r['product_count'],
         ], $rows);
     }
 

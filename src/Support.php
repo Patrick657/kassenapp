@@ -24,14 +24,20 @@ final class Support
         return ($cents < 0 ? '-' : '') . (string) round($abs / 100) . ' €';
     }
 
-    /** Parses German or English decimal input ("12,50" / "12.50") into cents. */
-    public static function parseAmountToCents(string $value): int
+    /** Parses German or English decimal input ("12,50" / "12.50") into a plain float. */
+    public static function parseGermanDecimal(string $value): float
     {
         $normalized = str_replace(',', '.', trim($value));
         if ($normalized === '' || !is_numeric($normalized)) {
-            return 0;
+            return 0.0;
         }
-        return (int) round(((float) $normalized) * 100);
+        return (float) $normalized;
+    }
+
+    /** Parses German or English decimal input ("12,50" / "12.50") into cents. */
+    public static function parseAmountToCents(string $value): int
+    {
+        return (int) round(self::parseGermanDecimal($value) * 100);
     }
 
     /**

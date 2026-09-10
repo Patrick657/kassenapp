@@ -50,8 +50,8 @@ async function api(path, opts = {}) {
   const res = await fetch('/api' + path, {
     method: opts.method || 'GET',
     credentials: 'same-origin',
-    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    headers: opts.raw ? { 'Content-Type': opts.contentType || 'text/plain' } : (opts.body ? { 'Content-Type': 'application/json' } : undefined),
+    body: opts.raw ? opts.body : (opts.body ? JSON.stringify(opts.body) : undefined),
   });
   let data = null;
   try { data = await res.json(); } catch (e) { /* empty body */ }
@@ -277,7 +277,7 @@ async function submitForm() {
         showToast('Gruppe angelegt');
       }
       closeForm();
-      await loadGroups();
+      await loadCategories();
       renderMain();
       return;
     }
@@ -289,6 +289,7 @@ async function submitForm() {
       if (!f.category) return setFormError('Artikelgruppe fehlt');
       const body = {
         name,
+        sku: (f.sku || '').trim(),
         category: f.category,
         priceCents: price,
         costCents: toCents(f.cost || '0'),
@@ -338,6 +339,26 @@ async function submitForm() {
 /* ---------------------------------------------------------------------
  * Admin data loaders
  * ------------------------------------------------------------------- */
+async function importArticlesFile(file) {
+  if (!file) return;
+  const text = await file.text();
+  try {
+    const result = await guardedAdminCall(() => api('/products/import', { method: 'POST', raw: true, contentType: 'text/csv; charset=utf-8', body: text }));
+    if (!result) return;
+    let msg = `Import: ${result.created} neu, ${result.updated} aktualisiert`;
+    if (result.errors && result.errors.length) {
+      msg += `, ${result.errors.length} Zeile(n) übersprungen`;
+      console.warn('Import-Fehler:', result.errors);
+    }
+    showToast(msg);
+    await Promise.all([loadBootstrap(), loadAdminProducts(), loadCategories()]);
+    renderHeader();
+    renderMain();
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
 async function loadAdminProducts() {
   const data = await guardedAdminCall(() => api('/admin/products'));
   if (data) state.admin.products = data;
@@ -350,9 +371,8 @@ async function loadOverview() {
   Object.assign(state.admin, { kpis, daily, hourly, ranking, payments });
 }
 async function loadGroups() {
-  const [groups, categories] = await guardedAdminCall(() => Promise.all([api('/reports/groups'), api('/categories')])) || [null, null];
-  if (groups) state.admin.groups = groups;
-  if (categories) state.admin.categories = categories;
+  const data = await guardedAdminCall(() => api('/reports/groups'));
+  if (data) state.admin.groups = data;
 }
 async function loadCategories() {
   const data = await guardedAdminCall(() => api('/categories'));
@@ -379,7 +399,8 @@ async function enterAdminTab(tab) {
   state.adminTab = tab;
   renderMain();
   if (tab === 'overview') await loadOverview();
-  else if (tab === 'groups') await loadGroups();
+  else if (tab === 'analytics') await loadGroups();
+  else if (tab === 'groups') await loadCategories();
   else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
   else if (tab === 'cash') await loadCashStatus();
@@ -560,7 +581,7 @@ function renderPos() {
  * Rendering — Admin
  * ------------------------------------------------------------------- */
 function adminTabsList() {
-  const tabs = [['overview', 'Übersicht'], ['groups', 'Artikelgruppen'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
+  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
   return tabs.filter((t) => t[0] !== 'stock' || state.settings.trackStock);
 }
 
@@ -625,17 +646,16 @@ function renderOverviewTab() {
 }
 
 function renderGroupsTab() {
-  const groups = state.admin.groups;
   const cats = state.admin.categories;
-  if (!groups || !cats) return '<p>Lädt…</p>';
-  const manage = `
+  if (!cats) return '<p>Lädt…</p>';
+  return `
     <div class="card-box">
       <div class="table-head-row" style="padding:0 0 12px">
-        <div><div class="title">Gruppen verwalten</div><div class="subtitle">${cats.length} Artikelgruppe(n)</div></div>
+        <div><div class="title">Artikelgruppen</div><div class="subtitle">${cats.length} Artikelgruppe(n)</div></div>
         <button data-action="new-category" class="btn-primary">+ Neue Gruppe</button>
       </div>
       ${cats.map((c) => `<div class="settings-row" data-action="toggle-category-default" data-id="${c.id}">
-        <div><div class="title">${esc(c.name)}</div><div class="hint">Lagerbestand für neue Artikel dieser Gruppe</div></div>
+        <div><div class="title">${esc(c.name)}</div><div class="hint">${c.productCount} Artikel · Lagerbestand-Standard für neue Artikel</div></div>
         <div style="display:flex;align-items:center;gap:14px">
           <div class="switch-track ${c.trackStockDefault ? 'on' : ''}"><div class="switch-knob"></div></div>
           <button data-action="rename-category" data-id="${c.id}">Umbenennen</button>
@@ -643,7 +663,12 @@ function renderGroupsTab() {
         </div>
       </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch keine Artikelgruppe angelegt.</div>'}
     </div>`;
-  return manage + groups.map((g) => `
+}
+
+function renderAnalyticsTab() {
+  const groups = state.admin.groups;
+  if (!groups) return '<p>Lädt…</p>';
+  return groups.map((g) => `
     <div class="group-card">
       <div class="group-head" data-action="show-group" data-name="${esc(g.name)}"><span class="name">${esc(g.name)}</span><span class="revenue mono">${eur(g.revenueCents)}</span></div>
       <div class="group-sub">${g.sharePct}% vom Gesamtumsatz · ${g.qty}× verkauft · ${g.count} Artikel</div>
@@ -659,7 +684,7 @@ function renderGroupsTab() {
         ${g.items.slice(0, 8).map((it) => `<div class="group-item-row" data-action="focus-article" data-id="${it.productId}"><span>${esc(it.name)}</span><span class="mono">${it.qty}× · ${eur(it.revenueCents)}</span></div>`).join('')}
       </div>
       <div class="group-show-all" data-action="show-group" data-name="${esc(g.name)}">Alle Artikel dieser Gruppe</div>
-    </div>`).join('');
+    </div>`).join('') || '<p style="color:var(--text-3);font-size:13px">Noch keine Verkäufe.</p>';
 }
 
 function renderArticlesTab() {
@@ -673,7 +698,7 @@ function renderArticlesTab() {
     const tracked = showStock && p.trackStock;
     const stockColor = !tracked ? 'var(--text-4)' : p.stock <= 0 ? 'var(--err-text)' : p.stock <= p.stockMin ? 'var(--warn-text)' : 'var(--ink)';
     return `<div class="article-row ${state.focusProduct === p.id ? 'focused' : ''}" id="artikel-${p.id}">
-      <span>${esc(p.name)}</span>
+      <span>${esc(p.name)}${p.sku ? `<span style="display:block;font-size:10.5px;font-weight:400;color:var(--text-3)">Art.-Nr. ${esc(p.sku)}</span>` : ''}</span>
       <span class="link" data-action="filter-category" data-cat="${esc(p.category)}">${esc(p.category)}</span>
       <span class="num mono">${eur(p.priceCents)}</span>
       <span class="num mono">${eur(p.costCents)}</span>
@@ -691,7 +716,12 @@ function renderArticlesTab() {
     <div class="table-card">
       <div class="table-head-row">
         <div><div class="title">Artikel</div><div class="subtitle">${filtered.length} Artikel · Marge über Einkaufspreis</div></div>
-        <button data-action="new-article" class="btn-primary">+ Neuer Artikel</button>
+        <div style="display:flex;gap:8px">
+          <button data-action="export-articles" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Export (CSV)</button>
+          <button data-action="import-articles" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Import (CSV)</button>
+          <input type="file" id="import-file-input" accept=".csv,text/csv" hidden>
+          <button data-action="new-article" class="btn-primary">+ Neuer Artikel</button>
+        </div>
       </div>
       <div class="table-scroll">
         <div class="article-cols"><span>Artikel</span><span>Kategorie</span><span class="num">VK</span><span class="num">EK</span><span class="num">Marge</span><span class="num">Bestand</span><span class="num">Verkauft</span><span>Aktionen</span></div>
@@ -821,9 +851,10 @@ function renderSettingsTab() {
 
 function renderAdmin() {
   const tabs = adminTabsList();
-  const tabLabels = { overview: 'Übersicht', groups: 'Artikelgruppen', articles: 'Artikel', stock: 'Bestand', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
+  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', articles: 'Artikel', stock: 'Bestand', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
   let content = '';
   if (state.adminTab === 'overview') content = renderOverviewTab();
+  else if (state.adminTab === 'analytics') content = renderAnalyticsTab();
   else if (state.adminTab === 'groups') content = renderGroupsTab();
   else if (state.adminTab === 'articles') content = renderArticlesTab();
   else if (state.adminTab === 'stock') content = renderStockTab();
@@ -848,6 +879,10 @@ function renderAdmin() {
         renderHeader();
       } catch (e) { showToast(e.message); }
     });
+  }
+  if (state.adminTab === 'articles') {
+    const fileInput = document.getElementById('import-file-input');
+    if (fileInput) fileInput.addEventListener('change', () => importArticlesFile(fileInput.files[0]));
   }
   if (state.focusProduct && state.adminTab === 'articles') {
     const row = document.getElementById('artikel-' + state.focusProduct);
@@ -904,6 +939,7 @@ function renderFormOverlay() {
       ? cats.map((c) => `<option value="${esc(c.name)}" ${f.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')
       : '<option value="">Keine Artikelgruppe angelegt</option>';
     fields = F('Bezeichnung', 'name', 'z.B. Bratwurst');
+    fields += F('Artikelnummer (optional)', 'sku', 'z.B. 10023');
     fields += `<div class="form-field"><label>Artikelgruppe</label><select data-form-key="category" ${cats.length ? '' : 'disabled'}>${catOptions}</select></div>`;
     fields += F('Verkaufspreis (€)', 'price', '3,50') + F('Einkaufspreis (€)', 'cost', '1,20');
     if (state.settings.trackStock) {
@@ -1050,7 +1086,7 @@ function onAction(e) {
     case 'toggle-category-default': {
       const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
       return void guardedAdminCall(() => api('/categories/' + c.id, { method: 'PATCH', body: { trackStockDefault: !c.trackStockDefault } }))
-        .then(() => loadGroups())
+        .then(() => loadCategories())
         .then(renderMain)
         .catch((e) => showToast(e.message));
     }
@@ -1061,21 +1097,23 @@ function onAction(e) {
       action: async () => {
         await api('/categories/' + d.id, { method: 'DELETE' });
         showToast('Gruppe gelöscht');
-        await loadGroups();
+        await loadCategories();
         renderMain();
       },
     });
     case 'toggle-form-trackstockdefault': state.form.trackStockDefault = !state.form.trackStockDefault; return renderOverlay();
+    case 'export-articles': window.location.href = '/api/products/export'; return;
+    case 'import-articles': return void document.getElementById('import-file-input').click();
     case 'new-article': {
       const cats = state.admin.categories || [];
       const defaultCat = cats[0];
-      const f = { kind: 'article', name: '', category: defaultCat ? defaultCat.name : '', price: '', cost: '' };
+      const f = { kind: 'article', name: '', sku: '', category: defaultCat ? defaultCat.name : '', price: '', cost: '' };
       if (state.settings.trackStock) { f.trackStock = defaultCat ? defaultCat.trackStockDefault : true; f.stock = '0'; f.stockMin = '10'; }
       return openForm(f);
     }
     case 'edit-article': {
       const p = state.admin.products.find((x) => x.id === Number(d.id));
-      const f = { kind: 'article', id: p.id, name: p.name, category: p.category, price: String(p.priceCents / 100).replace('.', ','), cost: String(p.costCents / 100).replace('.', ',') };
+      const f = { kind: 'article', id: p.id, name: p.name, sku: p.sku || '', category: p.category, price: String(p.priceCents / 100).replace('.', ','), cost: String(p.costCents / 100).replace('.', ',') };
       if (state.settings.trackStock) { f.trackStock = p.trackStock; f.stock = String(p.stock); f.stockMin = String(p.stockMin); }
       return openForm(f);
     }
@@ -1175,7 +1213,6 @@ async function mount() {
     <div id="main-root" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden"></div>
     <div id="overlay-root"></div>
     <div id="toast-root"></div>`;
-  document.getElementById('app').style.cssText = 'height:100vh;display:flex;flex-direction:column;overflow:hidden';
   document.getElementById('app').addEventListener('click', onAction);
 
   try {
