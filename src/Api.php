@@ -361,12 +361,34 @@ final class Api
     private function updateCodes(): array
     {
         $b = Support::jsonBody();
-        if (!empty($b['accessCode'])) {
-            $this->settings->setCodeHash('access_code_hash', password_hash((string) $b['accessCode'], PASSWORD_DEFAULT));
+        $accessCode = !empty($b['accessCode']) ? (string) $b['accessCode'] : null;
+        $deleteCode = !empty($b['deleteCode']) ? (string) $b['deleteCode'] : null;
+        if ($accessCode === null && $deleteCode === null) {
+            throw new ApiException(400, 'Kein Code angegeben');
         }
-        if (!empty($b['deleteCode'])) {
-            $this->settings->setCodeHash('delete_code_hash', password_hash((string) $b['deleteCode'], PASSWORD_DEFAULT));
+        if ($accessCode !== null && $deleteCode !== null && $accessCode === $deleteCode) {
+            throw new ApiException(400, 'Zugangscode und Löschkennwort müssen unterschiedlich sein');
         }
+        $raw = $this->settings->raw();
+        $currentAccessHash = $raw['access_code_hash'] ?? '';
+        $currentDeleteHash = $raw['delete_code_hash'] ?? '';
+        if ($accessCode !== null && $currentDeleteHash !== '' && password_verify($accessCode, $currentDeleteHash)) {
+            throw new ApiException(400, 'Zugangscode darf nicht dem Löschkennwort entsprechen');
+        }
+        if ($deleteCode !== null && $currentAccessHash !== '' && password_verify($deleteCode, $currentAccessHash)) {
+            throw new ApiException(400, 'Löschkennwort darf nicht dem Zugangscode entsprechen');
+        }
+
+        $changed = [];
+        if ($accessCode !== null) {
+            $this->settings->setCodeHash('access_code_hash', password_hash($accessCode, PASSWORD_DEFAULT));
+            $changed[] = 'Zugangscode';
+        }
+        if ($deleteCode !== null) {
+            $this->settings->setCodeHash('delete_code_hash', password_hash($deleteCode, PASSWORD_DEFAULT));
+            $changed[] = 'Löschkennwort';
+        }
+        $this->audit->log('settings.codes', implode(' + ', $changed) . ' geändert');
         return ['ok' => true];
     }
 

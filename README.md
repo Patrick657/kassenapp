@@ -32,21 +32,23 @@ bin/        setup.php (CLI setup)
    ```
    mysql -u youruser -p yourdb < migrations/001_schema.sql
    ```
-4. Set the access code and delete code (never hardcoded, never stored in the frontend):
-   ```
-   php bin/setup.php --access-code=1234 --delete-code=9999
-   ```
-   Pick your own codes for production — these are just the prototype's demo values. Access code
-   and delete code **must** differ (the script refuses otherwise). Add `--demo` on first setup if
-   you want the same 15 demo articles as the prototype to start from; omit it if you're entering
-   your own articles from scratch (the Artikel tab handles that once the app is up).
+4. Set the access code and delete code (never hardcoded, never stored in the frontend). Two ways —
+   pick whichever you have:
+   - **With SSH**: `php bin/setup.php --access-code=1234 --delete-code=9999` (access code and
+     delete code must differ, or the script refuses).
+   - **Without SSH** (e.g. shared hosting with only a web file manager, no terminal): open the app
+     in the browser, go to **Verwaltung → Einstellungen**. On a fresh install with no code set yet,
+     Verwaltung is reachable with no PIN prompt — set both codes there once, under "Zugangscode &
+     Löschkennwort". As soon as a code exists, that bootstrap bypass closes automatically and every
+     further visit to Verwaltung requires the PIN like normal. **Do this immediately after your
+     first deploy** — until you set a code, Verwaltung is open to anyone who finds the URL.
+   Add `--demo` to the CLI form on first setup if you want the same 15 demo articles as the
+   prototype to start from; omit it if you're entering your own articles from scratch.
 5. Enforce HTTPS at the webserver level (the access cookie is `HttpOnly`/`SameSite=Strict`, but
    only gets `Secure` when `APP_HTTPS=1`).
 
-Changing the codes later (e.g. before your next event) — same command, run again:
-```
-php bin/setup.php --access-code=<new> --delete-code=<new>
-```
+Changing the codes later (e.g. before your next event): same CLI command again, or Einstellungen →
+"Zugangscode & Löschkennwort" (this time it requires being unlocked first, as normal).
 
 ## Local development (what this session used)
 
@@ -87,9 +89,12 @@ GRANT ALL PRIVILEGES ON kassen_app.* TO 'kassen'@'localhost';
   aware — computed fresh per request rather than hardcoded, since a fixed `+01:00` would be wrong
   for roughly half the year). The daily/hourly reports rely on MySQL's session `time_zone` matching
   PHP's `Europe/Berlin`, which `Db.php` sets dynamically for the same DST reason.
-- **PIN/delete-code changing**: there's no in-app UI for this (the design never specified one) but
-  `bin/setup.php` and `PATCH /api/settings/codes` (auth-protected) both support it — use whichever
-  fits your ops workflow before each event.
+- **Setting/changing the PIN and delete code**: the original design never specified a UI for this,
+  but real deployments needed one (not everyone has SSH). Added a "Zugangscode & Löschkennwort"
+  card to Einstellungen, backed by `PATCH /api/settings/codes`. Its one deliberate deviation from
+  the rest of the auth model: on a fresh install (`access_code_hash` empty), `Auth::requireAccess()`
+  bypasses the lock entirely — otherwise nobody could ever reach Verwaltung to set the first code.
+  The bypass closes the moment a code is saved.
 - Everything else — layout, colors, spacing, copy, the discount/tender/change-breakdown logic, the
   Z-report/close semantics, the two-factor delete flow — mirrors `Kassen-App.dc.html` and
   `design_handoff_festkasse/README.md` as closely as the stack change allows.

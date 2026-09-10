@@ -73,7 +73,7 @@ const state = {
   products: [],
   cashBalanceCents: 0,
   todayRevenueCents: 0,
-  access: { unlocked: false, expiresAt: null },
+  access: { unlocked: false, expiresAt: null, codeConfigured: false },
 
   view: 'pos',
   adminTab: 'overview',
@@ -133,7 +133,7 @@ function tick() {
 }
 
 function lockLocally(msg) {
-  state.access = { unlocked: false, expiresAt: null };
+  state.access = { unlocked: false, expiresAt: null, codeConfigured: state.access.codeConfigured };
   state.view = 'pos';
   state.adminTab = 'overview';
   state.form = null;
@@ -364,7 +364,7 @@ async function enterAdminTab(tab) {
 
 function goPos() { state.view = 'pos'; renderHeader(); renderMain(); }
 async function goAdmin() {
-  if (state.settings.requireCode && !state.access.unlocked) {
+  if (state.settings.requireCode && state.access.codeConfigured && !state.access.unlocked) {
     state.showPin = true; state.pinBuf = ''; state.pinError = '';
     renderOverlay();
     return;
@@ -388,7 +388,7 @@ async function pinPress(k) {
   if (buf.length === 4) {
     try {
       const res = await api('/access', { method: 'POST', body: { code: buf } });
-      state.access = { unlocked: true, expiresAt: res.expiresAt };
+      state.access = { unlocked: true, expiresAt: res.expiresAt, codeConfigured: true };
       state.showPin = false; state.pinBuf = ''; state.pinError = '';
       state.view = 'admin';
       renderHeader(); renderOverlay();
@@ -755,6 +755,16 @@ function renderSettingsTab() {
         <div class="switch-track ${cfg[t[0]] ? 'on' : ''}"><div class="switch-knob"></div></div>
       </div>`).join('')}
     </div>
+    <div class="card-box" style="margin-top:12px">
+      <div class="form-title" style="margin-bottom:2px">Zugangscode &amp; Löschkennwort</div>
+      <div class="form-hint">${state.access.codeConfigured
+        ? 'Leer lassen, um einen Code unverändert zu lassen. Beide Codes müssen sich unterscheiden.'
+        : 'Noch kein Zugangscode gesetzt — Verwaltung ist deshalb aktuell offen. Lege jetzt beide Codes fest.'}</div>
+      <div class="form-field"><label>Neuer Zugangscode</label><input id="access-code-input" type="password" placeholder="z. B. 1234"></div>
+      <div class="form-field"><label>Neues Löschkennwort</label><input id="delete-code-input" type="password" placeholder="z. B. 9999"></div>
+      <div class="form-error" id="codes-error"></div>
+      <div class="form-actions"><button data-action="save-codes" class="primary" style="flex:1">Codes speichern</button></div>
+    </div>
     <div class="card-box" style="padding:0;margin-top:12px">
       <div class="data-summary">${counts ? `${counts.sales} Bons · ${counts.movements} Bewegungen · ${counts.products} Artikel gespeichert` : 'Lädt…'}</div>
       <div class="data-actions">
@@ -996,6 +1006,34 @@ function onAction(e) {
       return void guardedAdminCall(() => api('/settings', { method: 'PATCH', body: { [key]: next } }))
         .then((res) => { if (!res) return; state.settings = res; if (key === 'cardEnabled' && !next) state.payment = 'cash'; renderHeader(); renderMain(); })
         .catch((e) => showToast(e.message));
+    }
+    case 'save-codes': {
+      const accessInput = document.getElementById('access-code-input');
+      const deleteInput = document.getElementById('delete-code-input');
+      const errEl = document.getElementById('codes-error');
+      const accessCode = accessInput.value.trim();
+      const deleteCode = deleteInput.value.trim();
+      if (!accessCode && !deleteCode) { errEl.textContent = 'Bitte mindestens einen Code eingeben.'; return; }
+      if (accessCode && deleteCode && accessCode === deleteCode) { errEl.textContent = 'Zugangscode und Löschkennwort müssen unterschiedlich sein.'; return; }
+      const body = {};
+      if (accessCode) body.accessCode = accessCode;
+      if (deleteCode) body.deleteCode = deleteCode;
+      return void api('/settings/codes', { method: 'PATCH', body })
+        .then(async () => {
+          accessInput.value = ''; deleteInput.value = ''; errEl.textContent = '';
+          state.access.codeConfigured = true;
+          // Log in with the code just set so setting it doesn't immediately lock the admin out again.
+          if (accessCode && !state.access.unlocked) {
+            try {
+              const res = await api('/access', { method: 'POST', body: { code: accessCode } });
+              state.access = { unlocked: true, expiresAt: res.expiresAt, codeConfigured: true };
+            } catch (e) { /* fall through to plain success toast */ }
+          }
+          showToast('Code(s) gespeichert');
+          renderHeader();
+          renderMain();
+        })
+        .catch((e) => { errEl.textContent = e.message; });
     }
     case 'clear-sales': return openForm({
       kind: 'confirm', code: '', title: 'Verkäufe & Journal löschen',

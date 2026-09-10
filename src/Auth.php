@@ -45,12 +45,20 @@ final class Auth
         $stmt->execute([$ip, $ok ? 1 : 0]);
     }
 
-    /** @return array{unlocked:bool, expiresAt:?string} */
+    /** No access code has ever been set (fresh install) — there is nothing to unlock yet. */
+    public function hasAccessCode(): bool
+    {
+        $hash = $this->setting('access_code_hash');
+        return $hash !== null && $hash !== '';
+    }
+
+    /** @return array{unlocked:bool, expiresAt:?string, codeConfigured:bool} */
     public function status(): array
     {
+        $codeConfigured = $this->hasAccessCode();
         $token = $_COOKIE[self::COOKIE] ?? null;
         if (!$token) {
-            return ['unlocked' => false, 'expiresAt' => null];
+            return ['unlocked' => false, 'expiresAt' => null, 'codeConfigured' => $codeConfigured];
         }
         $hash = hash('sha256', $token);
         $stmt = $this->db->prepare(
@@ -59,9 +67,9 @@ final class Auth
         $stmt->execute([$hash]);
         $expiresAt = $stmt->fetchColumn();
         if ($expiresAt === false) {
-            return ['unlocked' => false, 'expiresAt' => null];
+            return ['unlocked' => false, 'expiresAt' => null, 'codeConfigured' => $codeConfigured];
         }
-        return ['unlocked' => true, 'expiresAt' => Support::toIso((string) $expiresAt)];
+        return ['unlocked' => true, 'expiresAt' => Support::toIso((string) $expiresAt), 'codeConfigured' => $codeConfigured];
     }
 
     /** @return array{expiresAt:string} */
@@ -105,10 +113,18 @@ final class Auth
         setcookie(self::COOKIE, '', ['expires' => time() - 3600, 'path' => '/']);
     }
 
-    /** Throws 401 unless a valid, non-expired access session exists — skipped only if require_code is off. */
+    /**
+     * Throws 401 unless a valid, non-expired access session exists. Skipped if require_code is off,
+     * and also skipped on a fresh install with no access code configured yet — otherwise nobody could
+     * ever reach Verwaltung to set the first code (there's no CLI/SSH on some shared hosts). Once a
+     * code is set, this bootstrap bypass closes automatically.
+     */
     public function requireAccess(): void
     {
         if (($this->setting('require_code') ?? '1') === '0') {
+            return;
+        }
+        if (!$this->hasAccessCode()) {
             return;
         }
         if (!$this->status()['unlocked']) {
