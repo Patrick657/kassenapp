@@ -89,6 +89,32 @@ without `ALTER` rights (say) degrades the affected feature instead of 500ing eve
 new migration by bumping `Migrator::LATEST_VERSION`, writing a `migrateToVN()` method that only
 uses portable, idempotent checks, and calling it from `ensureUpToDate()`.
 
+## Forgotten access code: email recovery
+
+Once a code is set, the only ways back in without it are `bin/setup.php` (needs SSH) or clearing
+`access_code_hash` in `settings` directly (needs phpMyAdmin or similar). For a deployment with
+neither, that's a real lockout risk, so there's now a self-service path:
+
+- **Einstellungen → Zugangscode & Löschkennwort** has an optional "Wiederherstellungs-E-Mail"
+  field (`settings.recovery_email`, migration v4). Worth filling in the first time you set a code.
+- The PIN dialog has a **"Code vergessen?"** link → `POST /api/access/forgot` (public, same rate
+  limit as login attempts — 5/15min/IP) emails a one-time link to that address, valid 30 minutes,
+  tracked in `access_resets` (migration v4). The response is the same whether or not an email is
+  configured, deliberately — it doesn't leak that state to an unauthenticated caller.
+- Opening `/?reset=<token>` shows a form to set a new access code (and optionally a new delete
+  code); `POST /api/access/reset` validates the token, applies the new code(s), marks the token
+  used, and logs the admin straight in — same as the first-time-setup flow.
+- **Sent via PHP's `mail()`** — no external service, no API key, works immediately on hosts that
+  have a local MTA configured (most shared hosting does), but deliverability isn't guaranteed
+  (can land in spam, or silently fail on hosts with no MTA at all — a failed send is logged
+  server-side but never surfaced to the caller). If that turns out to be unreliable in practice,
+  swapping `Auth::sendResetEmail()` for a transactional email API (Resend, Mailgun, ...) is a
+  contained change — everything else in the flow (token, expiry, rate limit) stays the same.
+- Set **`APP_URL`** in `.env` (e.g. `https://pos.example.com`) so the emailed link's domain comes
+  from your own config rather than the request's `Host` header — a defensive measure against a
+  misconfigured server letting someone spoof `Host` and get a phishing link mailed to your own
+  recovery address. Optional; falls back to `Host` if unset.
+
 ## Artikelgruppen & Lagerbestand pro Artikel
 
 Added after the initial handoff, at the operator's request: article groups became a managed

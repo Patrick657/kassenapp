@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 3;
+    private const LATEST_VERSION = 4;
 
     public function __construct(private readonly PDO $db)
     {
@@ -36,6 +36,10 @@ final class Migrator
         if ($current < 3) {
             $this->migrateToV3();
             $this->setVersion(3);
+        }
+        if ($current < 4) {
+            $this->migrateToV4();
+            $this->setVersion(4);
         }
     }
 
@@ -61,6 +65,23 @@ final class Migrator
             'sku',
             'ALTER TABLE products ADD COLUMN sku VARCHAR(60) NULL AFTER name'
         );
+    }
+
+    /** Recovery email + reset tokens, for resetting a forgotten access code without SSH/phpMyAdmin. */
+    private function migrateToV4(): void
+    {
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS access_resets (
+                token_hash  CHAR(64)  PRIMARY KEY,
+                created_at  DATETIME  NOT NULL,
+                expires_at  DATETIME  NOT NULL,
+                used_at     DATETIME  NULL,
+                ip          VARBINARY(16) NULL,
+                INDEX (expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $stmt = $this->db->prepare('INSERT IGNORE INTO settings (`key`, value) VALUES (?, ?)');
+        $stmt->execute(['recovery_email', '']);
     }
 
     private function ensureColumn(string $table, string $column, string $alterSql): void

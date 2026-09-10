@@ -83,4 +83,16 @@ final class SettingsRepo
         $raw = $this->raw();
         return $raw['access_code_hash'] ?? null;
     }
+
+    public function recoveryEmail(): ?string
+    {
+        $email = $this->raw()['recovery_email'] ?? '';
+        return $email === '' ? null : $email;
+    }
+
+    public function setRecoveryEmail(?string $email): void
+    {
+        $stmt = $this->db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
+        $stmt->execute(['recovery_email', $email ?? '']);
+    }
 }

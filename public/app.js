@@ -98,7 +98,7 @@ const state = {
   toast: '',
   clock: '',
 
-  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null },
+  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null },
 };
 
 let toastTimer = null;
@@ -266,6 +266,20 @@ async function submitForm() {
       closeForm();
       return;
     }
+    if (f.kind === 'reset-code') {
+      const accessCode = (f.accessCode || '').trim();
+      if (!accessCode) return setFormError('Neuer Zugangscode fehlt');
+      const deleteCode = (f.deleteCode || '').trim() || null;
+      const res = await api('/access/reset', { method: 'POST', body: { token: f.token, accessCode, deleteCode } });
+      state.access = { unlocked: true, expiresAt: res.expiresAt, codeConfigured: true };
+      history.replaceState({}, '', location.pathname);
+      closeForm();
+      state.view = 'admin';
+      showToast('Zugangscode zurückgesetzt');
+      renderHeader();
+      await enterAdminTab('overview');
+      return;
+    }
     if (f.kind === 'category') {
       const name = (f.name || '').trim();
       if (!name) return setFormError('Name fehlt');
@@ -394,6 +408,10 @@ async function loadMaintenanceCounts() {
   const data = await guardedAdminCall(() => api('/maintenance/status'));
   if (data) state.admin.maintenanceCounts = data;
 }
+async function loadRecoveryEmail() {
+  const data = await guardedAdminCall(() => api('/settings/codes'));
+  if (data) state.admin.recoveryEmail = data.recoveryEmail;
+}
 
 async function enterAdminTab(tab) {
   state.adminTab = tab;
@@ -404,7 +422,7 @@ async function enterAdminTab(tab) {
   else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
   else if (tab === 'cash') await loadCashStatus();
-  else if (tab === 'settings') await loadMaintenanceCounts();
+  else if (tab === 'settings') await Promise.all([loadMaintenanceCounts(), loadRecoveryEmail()]);
   renderMain();
 }
 
@@ -811,6 +829,7 @@ function renderCashTab() {
 function renderSettingsTab() {
   const cfg = state.settings;
   const counts = state.admin.maintenanceCounts;
+  const recoveryEmail = state.admin.recoveryEmail;
   const toggles = [
     ['trackStock', 'Lagerbestand führen', 'Bestände mitzählen, Ausverkauft sperren, Warenzugang buchen'],
     ['warnLow', 'Warnung bei niedrigem Bestand', 'Hinweis beim Kassieren und in der Übersicht'],
@@ -836,8 +855,13 @@ function renderSettingsTab() {
         : 'Noch kein Zugangscode gesetzt — Verwaltung ist deshalb aktuell offen. Lege jetzt beide Codes fest.'}</div>
       <div class="form-field"><label>Neuer Zugangscode</label><input id="access-code-input" type="password" placeholder="z. B. 1234"></div>
       <div class="form-field"><label>Neues Löschkennwort</label><input id="delete-code-input" type="password" placeholder="z. B. 9999"></div>
+      <div class="form-field">
+        <label>Wiederherstellungs-E-Mail (optional)</label>
+        <input id="recovery-email-input" type="email" placeholder="z. B. du@example.com" value="${esc(recoveryEmail || '')}">
+      </div>
+      <div class="form-hint" style="margin-top:-6px">Für "Code vergessen?" im PIN-Dialog — falls hinterlegt, kommt dort ein Link zum Zurücksetzen an.</div>
       <div class="form-error" id="codes-error"></div>
-      <div class="form-actions"><button data-action="save-codes" class="primary" style="flex:1">Codes speichern</button></div>
+      <div class="form-actions"><button data-action="save-codes" class="primary" style="flex:1">Speichern</button></div>
     </div>
     <div class="card-box" style="padding:0;margin-top:12px">
       <div class="data-summary">${counts ? `${counts.sales} Bons · ${counts.movements} Bewegungen · ${counts.products} Artikel gespeichert` : 'Lädt…'}</div>
@@ -950,6 +974,11 @@ function renderFormOverlay() {
       if (f.trackStock) fields += F('Bestand', 'stock', '100') + F('Meldebestand', 'stockMin', '20');
     }
     if (!cats.length) hint = 'Erst unter "Artikelgruppen" mindestens eine Gruppe anlegen, bevor du einen Artikel speichern kannst.';
+  } else if (f.kind === 'reset-code') {
+    title = 'Zugangscode zurücksetzen';
+    hint = 'Neuen Zugangscode festlegen. Löschkennwort nur ändern, wenn nötig.';
+    fields = F('Neuer Zugangscode', 'accessCode', 'z. B. 1234') + F('Neues Löschkennwort (optional)', 'deleteCode', 'unverändert lassen');
+    submitLabel = 'Zurücksetzen';
   } else if (f.kind === 'category') {
     title = f.id ? 'Gruppe umbenennen' : 'Neue Artikelgruppe';
     fields = F('Name', 'name', 'z. B. Merchandise');
@@ -992,6 +1021,7 @@ function renderPinOverlay() {
       <div class="pin-dots">${[0, 1, 2, 3].map((i) => `<div class="pin-dot ${i < state.pinBuf.length ? 'filled' : ''}"></div>`).join('')}</div>
       <div class="pin-error">${esc(state.pinError)}</div>
       <div class="pin-keys">${keys.map((k) => `<button data-action="pin-press" data-key="${k}" class="${k === 'x' || k === 'del' ? 'ghost' : ''}">${k === 'del' ? '⌫' : k === 'x' ? 'Abbr.' : k}</button>`).join('')}</div>
+      <div style="margin-top:14px"><button data-action="forgot-code" style="font-size:12px;font-weight:600;color:var(--text-3);text-decoration:underline">Code vergessen?</button></div>
     </div>
   </div>`;
 }
@@ -1064,6 +1094,9 @@ function onAction(e) {
     case 'close-form': return closeForm();
     case 'submit-form': return void submitForm();
     case 'pin-press': return void pinPress(d.key);
+    case 'forgot-code': return void api('/access/forgot', { method: 'POST' })
+      .then(() => showToast('E-Mail verschickt · Link ist 30 Minuten gültig'))
+      .catch((e) => showToast(e.message));
 
     case 'set-admintab': return void enterAdminTab(d.tab);
     case 'set-catfilter': state.catFilter = d.cat; state.focusProduct = null; return renderMain();
@@ -1154,18 +1187,21 @@ function onAction(e) {
     case 'save-codes': {
       const accessInput = document.getElementById('access-code-input');
       const deleteInput = document.getElementById('delete-code-input');
+      const emailInput = document.getElementById('recovery-email-input');
       const errEl = document.getElementById('codes-error');
       const accessCode = accessInput.value.trim();
       const deleteCode = deleteInput.value.trim();
-      if (!accessCode && !deleteCode) { errEl.textContent = 'Bitte mindestens einen Code eingeben.'; return; }
+      const recoveryEmail = emailInput.value.trim();
+      if (!accessCode && !deleteCode && recoveryEmail === (state.admin.recoveryEmail || '')) { errEl.textContent = 'Nichts zu speichern.'; return; }
       if (accessCode && deleteCode && accessCode === deleteCode) { errEl.textContent = 'Zugangscode und Löschkennwort müssen unterschiedlich sein.'; return; }
-      const body = {};
+      const body = { recoveryEmail };
       if (accessCode) body.accessCode = accessCode;
       if (deleteCode) body.deleteCode = deleteCode;
       return void api('/settings/codes', { method: 'PATCH', body })
         .then(async () => {
           accessInput.value = ''; deleteInput.value = ''; errEl.textContent = '';
           state.access.codeConfigured = true;
+          state.admin.recoveryEmail = recoveryEmail;
           // Log in with the code just set so setting it doesn't immediately lock the admin out again.
           if (accessCode && !state.access.unlocked) {
             try {
@@ -1227,6 +1263,11 @@ async function mount() {
   renderToast();
   tick();
   setInterval(tick, 10000);
+
+  const resetToken = new URLSearchParams(location.search).get('reset');
+  if (resetToken) {
+    openForm({ kind: 'reset-code', token: resetToken, accessCode: '', deleteCode: '' });
+  }
 }
 
 mount();

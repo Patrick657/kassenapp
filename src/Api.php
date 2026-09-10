@@ -82,6 +82,17 @@ final class Api
             }
         }
 
+        if ($method === 'POST' && $path === '/api/access/forgot') {
+            $this->auth->requestReset();
+            return ['ok' => true];
+        }
+
+        if ($method === 'POST' && $path === '/api/access/reset') {
+            $b = Support::jsonBody();
+            $deleteCode = !empty($b['deleteCode']) ? (string) $b['deleteCode'] : null;
+            return $this->auth->consumeReset((string) ($b['token'] ?? ''), (string) ($b['accessCode'] ?? ''), $deleteCode);
+        }
+
         if ($method === 'POST' && $path === '/api/sales') {
             return $this->createSale();
         }
@@ -207,9 +218,14 @@ final class Api
             return $this->settings->forClient();
         }
 
-        if ($method === 'PATCH' && $path === '/api/settings/codes') {
+        if ($path === '/api/settings/codes') {
             $this->auth->requireAccess();
-            return $this->updateCodes();
+            if ($method === 'GET') {
+                return ['recoveryEmail' => $this->settings->recoveryEmail()];
+            }
+            if ($method === 'PATCH') {
+                return $this->updateCodes();
+            }
         }
 
         if ($method === 'POST' && $path === '/api/maintenance/purge') {
@@ -560,8 +576,16 @@ final class Api
         $b = Support::jsonBody();
         $accessCode = !empty($b['accessCode']) ? (string) $b['accessCode'] : null;
         $deleteCode = !empty($b['deleteCode']) ? (string) $b['deleteCode'] : null;
-        if ($accessCode === null && $deleteCode === null) {
+        $hasRecoveryEmail = array_key_exists('recoveryEmail', $b);
+        if ($accessCode === null && $deleteCode === null && !$hasRecoveryEmail) {
             throw new ApiException(400, 'Kein Code angegeben');
+        }
+        if ($hasRecoveryEmail) {
+            $recoveryEmail = trim((string) $b['recoveryEmail']);
+            if ($recoveryEmail !== '' && !filter_var($recoveryEmail, FILTER_VALIDATE_EMAIL)) {
+                throw new ApiException(400, 'Ungültige E-Mail-Adresse');
+            }
+            $this->settings->setRecoveryEmail($recoveryEmail === '' ? null : $recoveryEmail);
         }
         if ($accessCode !== null && $deleteCode !== null && $accessCode === $deleteCode) {
             throw new ApiException(400, 'Zugangscode und Löschkennwort müssen unterschiedlich sein');
@@ -584,6 +608,12 @@ final class Api
         if ($deleteCode !== null) {
             $this->settings->setCodeHash('delete_code_hash', password_hash($deleteCode, PASSWORD_DEFAULT));
             $changed[] = 'Löschkennwort';
+        }
+        if ($hasRecoveryEmail) {
+            $changed[] = 'Wiederherstellungs-E-Mail';
+        }
+        if (empty($changed)) {
+            return ['ok' => true];
         }
         $this->audit->log('settings.codes', implode(' + ', $changed) . ' geändert');
         return ['ok' => true];
