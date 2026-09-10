@@ -145,6 +145,30 @@ within that capped height; the footer stays pinned below it. Also switched `100v
 (`#app`, modal `max-height`s) throughout, since plain `vh` is fixed to the tallest possible
 viewport and doesn't account for mobile Safari's collapsing address bar.
 
+## Installable as a homescreen app (PWA)
+
+No App Store, no Xcode, no Apple Developer account — this is a standard installable web app:
+
+- **On the iPad**: open the site in Safari → Share → **Zum Home-Bildschirm**. It gets a real app
+  icon and launches full-screen (no address bar), same as any App Store app, straight from the
+  existing deployment.
+- `public/manifest.webmanifest` declares the app name, icon set, and `display: standalone`.
+  `public/icons/` holds the generated icon (dark background, accent-green €, matching the app's
+  own palette) at the sizes iOS/Android actually request — regenerate by editing
+  `Kassen-App.dc.html`'s brand colors and re-rendering, or just replace the PNGs directly.
+- `public/sw.js` is a small service worker caching the app shell (`/`, `/app.js`, `/styles.css`)
+  network-first with a cache fallback — instant reloads, and it still opens if the festival wifi
+  drops for a moment. `/api/*` is explicitly never intercepted: sales, stock, and reports always
+  need a live network round-trip, caching those would be actively wrong.
+- `env(safe-area-inset-*)` padding on `#app` keeps the checkout footer clear of the home-indicator
+  gesture strip current iPads reserve at the bottom when running installed, without affecting
+  normal in-Safari use (insets are `0` there).
+
+If a real App Store app ever becomes worth the $99/year Apple Developer account + Xcode/macOS
+build step it requires, wrapping this same frontend in a thin WKWebView shell (Capacitor or a
+handful of lines of Swift) is a much smaller lift than rewriting it natively, and the PHP API
+underneath doesn't change either way.
+
 ## What differs from the Claude Design prototype (and why)
 
 - **Storage**: MySQL instead of `localStorage`; every mutation goes through `/api/*` with prepared

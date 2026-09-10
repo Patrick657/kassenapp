@@ -47,7 +47,14 @@ a { color: var(--accent); }
 /* dvh accounts for mobile Safari's collapsing address bar — plain vh is fixed to the tallest
    possible viewport, so content sized against it can end up clipped below the visible area
    whenever the toolbar is showing. Declared after vh so unsupporting browsers keep the vh value. */
-#app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+#app {
+  height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden;
+  /* Installed as a homescreen app, iPadOS still reserves a swipe-up gesture strip at the bottom
+     (no physical home button on current iPads) — padding-bottom keeps the checkout footer clear
+     of it. Zero on any device without a safe area, so this is a no-op everywhere else. */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
 
 /* ---- Header ---- */
 .header {
