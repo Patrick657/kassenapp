@@ -1,0 +1,41 @@
+name: Deploy to netcup via FTP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run only — show what would change, upload nothing"
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync files via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.4.0
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
+          local-dir: ./
+          server-dir: ./
+          dry-run: ${{ github.event.inputs.dry_run == 'true' }}
+          # .env is never in git, so this action — which only ever touches files it has
+          # itself previously uploaded, tracked in its own state file — can never delete it.
+          # These excludes just keep dev-only content off the live webspace.
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            .github/**
+            design/**
+            .env
+            .env.example
+            README.md
