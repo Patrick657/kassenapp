@@ -457,6 +457,10 @@ async function enterAdminTab(tab) {
 
 function goPos() { state.view = 'pos'; renderHeader(); renderMain(); }
 async function goAdmin() {
+  if (!canUseAdmin()) {
+    showToast('Verwaltung ist für diesen Benutzer nicht verfügbar');
+    return;
+  }
   if (state.settings.requireCode && state.access.codeConfigured && !state.access.unlocked) {
     state.showPin = true; state.pinBuf = ''; state.pinError = '';
     renderOverlay();
@@ -508,6 +512,10 @@ async function posPinPress(k) {
       const res = await api('/pos/login', { method: 'POST', body: { userId: state.posSelectedUserId, pin: buf } });
       state.showPosPin = false; state.posPinBuf = ''; state.posPinError = ''; state.posSelectedUserId = null;
       state.posUser = res.user;
+      if (res.user.role === 'cashier' && state.view === 'admin') {
+        state.view = 'pos';
+        state.adminTab = 'overview';
+      }
       renderOverlay();
       await loadBootstrap();
       renderHeader();
@@ -545,6 +553,10 @@ function lockLabel() {
   return 'Sperren · ' + (m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min');
 }
 
+function canUseAdmin() {
+  return !(state.posUser && state.posUser.role === 'cashier');
+}
+
 function renderHeader() {
   const el = document.getElementById('header-root');
   const showLock = state.settings.requireCode && state.access.unlocked;
@@ -552,7 +564,7 @@ function renderHeader() {
     <div class="brand"><span class="name">${esc(state.shopName)}</span><span class="tag">POS + WaWi</span></div>
     <div class="switch">
       <button data-action="go-pos" class="${state.view === 'pos' ? 'active' : ''}">Kasse</button>
-      <button data-action="go-admin" class="${state.view === 'admin' ? 'active' : ''}">Verwaltung</button>
+      ${canUseAdmin() ? `<button data-action="go-admin" class="${state.view === 'admin' ? 'active' : ''}">Verwaltung</button>` : ''}
     </div>
     ${state.posUsers.length ? `<div class="pos-user-badge">
       ${state.posUser

@@ -144,9 +144,8 @@ like a limited print run of 100 T-shirts that must be).
 
 Added at the operator's request: a festival typically runs more than one register from one shared
 article catalog (e.g. a merch stand and a food/drinks stand), and each station should only see the
-articles relevant to it. This is a **separate, independent layer** from the Zugangscode/
-Löschkennwort pair that guards Verwaltung — that system is unchanged; this one only controls what a
-register's POS screen shows and may sell.
+articles relevant to it — and a `cashier`-role login must be POS-only, full stop, with Verwaltung
+reserved for `admin`-role logins (or the Zugangscode alone, when the feature isn't in use at all).
 
 - **`users` table** (migration v5): `name`, a 4-digit `pin_hash`, `role` (`admin` or `cashier`),
   `active`. **`user_categories`** maps a `cashier`-role user to the article groups they may sell —
@@ -173,6 +172,15 @@ register's POS screen shows and may sell.
 - Rate-limited through the same shared bucket as the access/delete codes and the reset-link request
   (`Auth::checkRateLimit()`/`recordAttempt()`) — a 4-digit PIN is guessable, and it's one more
   PIN-guessing surface on the same IP-based throttle.
+- **A `cashier`-role login can never reach Verwaltung — enforced server-side, not just a hidden
+  button.** `Auth::requireAccess()` (every protected route) and `Auth::attempt()` (entering the
+  Zugangscode itself) both reject with 403 while the device's current POS login is a `cashier`,
+  even if that device happens to know the Zugangscode — the PIN wasn't even accepted, so there's no
+  confusing "unlocked yet everything 403s" state. This check runs *before* the `require_code`
+  toggle and can't be switched off by it; it's a separate, stronger boundary. An `admin`-role POS
+  login, or no POS login at all (feature unused, or logged out), still goes through the normal
+  Zugangscode flow unchanged. The frontend mirrors this by hiding the "Verwaltung" tab entirely
+  for a `cashier` login (`canUseAdmin()` in `app.js`).
 
 ## Artikelnummer (SKU) und CSV Export/Import
 

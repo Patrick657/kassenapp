@@ -72,9 +72,24 @@ final class Auth
         return ['unlocked' => true, 'expiresAt' => Support::toIso((string) $expiresAt), 'codeConfigured' => $codeConfigured];
     }
 
+    /**
+     * A 'cashier'-role POS login is register-only, full stop — it must never reach Verwaltung,
+     * even if it happens to know the access code (e.g. written down and shared by accident).
+     * Checked before the code is even accepted, not just before protected actions, so a cashier
+     * device can't end up "unlocked" yet 403ing on every subsequent call.
+     */
+    private function assertNotCashierDevice(): void
+    {
+        $posUser = $this->posCurrentUser();
+        if ($posUser !== null && $posUser['role'] === 'cashier') {
+            throw new ApiException(403, 'Verwaltung ist für diesen Benutzer nicht verfügbar');
+        }
+    }
+
     /** @return array{expiresAt:string} */
     public function attempt(string $code): array
     {
+        $this->assertNotCashierDevice();
         $ip = Support::clientIp();
         $this->checkRateLimit($ip);
         $hash = $this->setting('access_code_hash');
@@ -117,10 +132,12 @@ final class Auth
      * Throws 401 unless a valid, non-expired access session exists. Skipped if require_code is off,
      * and also skipped on a fresh install with no access code configured yet — otherwise nobody could
      * ever reach Verwaltung to set the first code (there's no CLI/SSH on some shared hosts). Once a
-     * code is set, this bootstrap bypass closes automatically.
+     * code is set, this bootstrap bypass closes automatically. The cashier-device check runs first
+     * and is never skipped by require_code=0 — it's a separate, stronger boundary.
      */
     public function requireAccess(): void
     {
+        $this->assertNotCashierDevice();
         if (($this->setting('require_code') ?? '1') === '0') {
             return;
         }
