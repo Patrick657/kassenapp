@@ -76,6 +76,18 @@ a { color: var(--accent); }
 .header .lock-btn:hover { background: rgba(255,255,255,.2); }
 .header .clock { font-size: 13px; color: rgba(255,255,255,.55); min-width: 48px; text-align: right; }
 
+.pos-user-badge { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; color: #fff; min-width: 0; }
+.pos-user-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 22vw; }
+.pos-user-badge .pos-user-none { color: rgba(255,255,255,.42); font-weight: 600; }
+.pos-user-badge button { padding: 6px 11px; border-radius: 8px; background: rgba(255,255,255,.12); color: #fff; font-size: 11.5px; font-weight: 700; }
+.pos-user-badge button:hover { background: rgba(255,255,255,.2); }
+
+.pos-user-select { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 24px; }
+.pos-user-select-title { font-size: 18px; font-weight: 800; }
+.pos-user-tiles { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; max-width: 640px; }
+.pos-user-tile { padding: 20px 30px; min-width: 140px; border-radius: 16px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.06); font-size: 15px; font-weight: 700; transition: transform .08s; }
+.pos-user-tile:active { transform: scale(.96); }
+
 /* ---- POS layout ---- */
 .pos { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 14px; }
 .pos-left { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
@@ -353,6 +365,12 @@ a { color: var(--accent); }
 .settings-row:hover { background: var(--row-hover); }
 .settings-row .title { font-size: 13.5px; font-weight: 600; }
 .settings-row .hint { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+
+.badge-admin, .badge-inactive { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 2px 7px; border-radius: 6px; vertical-align: middle; }
+.badge-admin { background: var(--info-fill); color: var(--info-text); }
+.badge-inactive { background: var(--fill); color: var(--text-3); }
+.checkbox-list { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--field-border); border-radius: 10px; }
+.checkbox-row { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; }
 .settings-text-field { width: 220px; padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--field-border); font-size: 14px; cursor: text; }
 .settings-text-field:focus { outline: none; border-color: var(--ink); }
 .switch-track { flex: none; width: 48px; height: 28px; border-radius: 99px; padding: 3px; display: flex; transition: background .15s; background: rgba(0,0,0,.16); }
@@ -383,4 +401,12 @@ a { color: var(--accent); }
 @media (max-width: 480px) {
   .tile-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
   .notes-grid, .coins-grid { gap: 4px; }
+}
+
+@media (max-width: 900px) {
+  /* Header is a fixed-height single row (see .header) — with the POS-user badge added, a
+     narrow tablet no longer has room for every KPI, so the least essential one gives way
+     first rather than letting the row silently overflow off the right edge. */
+  .header { gap: 10px; }
+  .header .kpi:nth-of-type(2) { display: none; }
 }

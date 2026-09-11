@@ -12,6 +12,7 @@ use Festkasse\Repo\ProductRepo;
 use Festkasse\Repo\ReportsRepo;
 use Festkasse\Repo\SaleRepo;
 use Festkasse\Repo\SettingsRepo;
+use Festkasse\Repo\UserRepo;
 use Festkasse\Repo\ZReportRepo;
 use PDO;
 
@@ -28,6 +29,7 @@ final class Api
     private ReportsRepo $reports;
     private AuditRepo $audit;
     private MaintenanceRepo $maintenance;
+    private UserRepo $users;
 
     public function __construct(private readonly PDO $db, bool $https)
     {
@@ -42,6 +44,7 @@ final class Api
         $this->reports = new ReportsRepo($db);
         $this->audit = new AuditRepo($db);
         $this->maintenance = new MaintenanceRepo($db);
+        $this->users = new UserRepo($db);
     }
 
     public function handle(string $method, string $path): void
@@ -95,6 +98,53 @@ final class Api
 
         if ($method === 'POST' && $path === '/api/sales') {
             return $this->createSale();
+        }
+
+        if ($method === 'POST' && $path === '/api/pos/login') {
+            $b = Support::jsonBody();
+            return $this->auth->posLogin((int) ($b['userId'] ?? 0), (string) ($b['pin'] ?? ''));
+        }
+
+        if ($method === 'POST' && $path === '/api/pos/logout') {
+            $this->auth->posLogout();
+            return ['ok' => true];
+        }
+
+        if ($path === '/api/users') {
+            $this->auth->requireAccess();
+            if ($method === 'GET') {
+                return $this->users->listAll();
+            }
+            if ($method === 'POST') {
+                $b = Support::jsonBody();
+                $id = $this->users->create(
+                    (string) ($b['name'] ?? ''),
+                    (string) ($b['pin'] ?? ''),
+                    (string) ($b['role'] ?? 'cashier'),
+                    (array) ($b['categoryIds'] ?? [])
+                );
+                $this->audit->log('user.create', 'Benutzer angelegt: ' . (string) ($b['name'] ?? ''));
+                return ['id' => $id];
+            }
+        }
+
+        if (preg_match('#^/api/users/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            $this->auth->requireAccess();
+            if ($method === 'PATCH') {
+                return $this->updateUser($id);
+            }
+            if ($method === 'DELETE') {
+                $b = Support::jsonBody();
+                $this->auth->verifyDeleteCode($b['deleteCode'] ?? null);
+                $user = $this->users->find($id);
+                if ($user === null) {
+                    throw new ApiException(404, 'Benutzer nicht gefunden');
+                }
+                $this->users->delete($id);
+                $this->audit->log('user.delete', 'Benutzer gelöscht: ' . $user['name']);
+                return ['ok' => true];
+            }
         }
 
         if ($method === 'GET' && preg_match('#^/api/receipts/([A-Za-z0-9\-]+)$#', $path, $m)) {
@@ -244,6 +294,11 @@ final class Api
     private function bootstrap(): array
     {
         $settings = $this->settings->forClient();
+        $allowedCategories = $this->auth->posAllowedCategories(); // null = unrestricted (admin or feature unused)
+        $active = $this->products->listActive();
+        if ($allowedCategories !== null) {
+            $active = array_values(array_filter($active, static fn ($p) => in_array($p['category'], $allowedCategories, true)));
+        }
         $products = array_map(static fn ($p) => [
             'id' => (int) $p['id'],
             'name' => $p['name'],
@@ -252,7 +307,7 @@ final class Api
             'stock' => (int) $p['stock'],
             'stockMin' => (int) $p['stock_min'],
             'trackStock' => (bool) $p['track_stock'],
-        ], $this->products->listActive());
+        ], $active);
 
         $today = (int) $this->db->query(
             "SELECT COALESCE(SUM(total_cents), 0) FROM sales WHERE voided_at IS NULL AND DATE(sold_at) = CURDATE()"
@@ -265,7 +320,28 @@ final class Api
             'cashBalanceCents' => $this->cash->balanceCents(),
             'todayRevenueCents' => $today,
             'access' => $this->auth->status(),
+            'posUsers' => $this->auth->posUsers(),
+            'posUser' => $this->auth->posCurrentUser(),
         ];
+    }
+
+    private function updateUser(int $id): array
+    {
+        $b = Support::jsonBody();
+        $user = $this->users->find($id);
+        if ($user === null) {
+            throw new ApiException(404, 'Benutzer nicht gefunden');
+        }
+        $this->users->update(
+            $id,
+            (string) ($b['name'] ?? $user['name']),
+            (string) ($b['role'] ?? $user['role']),
+            array_key_exists('active', $b) ? (bool) $b['active'] : (bool) $user['active'],
+            !empty($b['pin']) ? (string) $b['pin'] : null,
+            array_key_exists('categoryIds', $b) ? (array) $b['categoryIds'] : $this->users->categoryIdsFor($id)
+        );
+        $this->audit->log('user.update', 'Benutzer geändert: ' . (string) ($b['name'] ?? $user['name']));
+        return ['ok' => true];
     }
 
     private function adminProducts(): array
@@ -546,6 +622,18 @@ final class Api
                 'unitCents' => (int) ($item['unitCents'] ?? 0),
                 'qty' => (int) ($item['qty'] ?? 0),
             ];
+        }
+        $allowedCategories = $this->auth->posAllowedCategories();
+        if ($allowedCategories !== null) {
+            foreach ($items as $item) {
+                if ($item['productId'] === null) {
+                    continue;
+                }
+                $product = $this->products->find($item['productId']);
+                if ($product === null || !in_array($product['category'], $allowedCategories, true)) {
+                    throw new ApiException(403, 'Artikel außerhalb des Benutzerbereichs · bitte Benutzer wechseln');
+                }
+            }
         }
         $trackStock = $this->settings->bool('track_stock', true);
         return $this->sales->create(

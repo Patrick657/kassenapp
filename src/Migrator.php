@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 4;
+    private const LATEST_VERSION = 5;
 
     public function __construct(private readonly PDO $db)
     {
@@ -40,6 +40,10 @@ final class Migrator
         if ($current < 4) {
             $this->migrateToV4();
             $this->setVersion(4);
+        }
+        if ($current < 5) {
+            $this->migrateToV5();
+            $this->setVersion(5);
         }
     }
 
@@ -82,6 +86,15 @@ final class Migrator
         );
         $stmt = $this->db->prepare('INSERT IGNORE INTO settings (`key`, value) VALUES (?, ?)');
         $stmt->execute(['recovery_email', '']);
+    }
+
+    /** Multi-user POS logins + per-user article-group access (Merchandising vs. Speisen/Getränke stations). */
+    private function migrateToV5(): void
+    {
+        $sql = file_get_contents(__DIR__ . '/../migrations/004_users.sql');
+        if ($sql !== false) {
+            $this->db->exec($sql);
+        }
     }
 
     private function ensureColumn(string $table, string $column, string $alterSql): void

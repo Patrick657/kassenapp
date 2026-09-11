@@ -74,6 +74,12 @@ const state = {
   cashBalanceCents: 0,
   todayRevenueCents: 0,
   access: { unlocked: false, expiresAt: null, codeConfigured: false },
+  posUsers: [],
+  posUser: null,
+  posSelectedUserId: null,
+  showPosPin: false,
+  posPinBuf: '',
+  posPinError: '',
 
   view: 'pos',
   adminTab: 'overview',
@@ -98,7 +104,7 @@ const state = {
   toast: '',
   clock: '',
 
-  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null },
+  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null },
 };
 
 let toastTimer = null;
@@ -120,6 +126,8 @@ async function loadBootstrap() {
   state.cashBalanceCents = data.cashBalanceCents;
   state.todayRevenueCents = data.todayRevenueCents;
   state.access = data.access;
+  state.posUsers = data.posUsers || [];
+  state.posUser = data.posUser || null;
   state.loaded = true;
 }
 
@@ -323,6 +331,22 @@ async function submitForm() {
       renderMain();
       return;
     }
+    if (f.kind === 'user') {
+      const name = (f.name || '').trim();
+      if (!name) return setFormError('Name fehlt');
+      if (!f.id && !/^\d{4}$/.test(f.pin || '')) return setFormError('PIN muss 4-stellig sein');
+      if (f.id && f.pin && !/^\d{4}$/.test(f.pin)) return setFormError('PIN muss 4-stellig sein');
+      const body = { name, role: f.role, categoryIds: f.role === 'cashier' ? (f.categoryIds || []) : [] };
+      if (f.pin) body.pin = f.pin;
+      if (f.id) body.active = !!f.active;
+      await guardedAdminCall(() => (f.id ? api('/users/' + f.id, { method: 'PATCH', body }) : api('/users', { method: 'POST', body })));
+      closeForm();
+      showToast(f.id ? 'Benutzer gespeichert' : 'Benutzer angelegt');
+      await Promise.all([loadUsers(), loadBootstrap()]);
+      renderHeader();
+      renderMain();
+      return;
+    }
     if (f.kind === 'delivery') {
       const qty = Math.round(parseAmount(f.qty || '0'));
       if (qty <= 0) return setFormError('Menge muss größer als 0 sein');
@@ -412,6 +436,10 @@ async function loadRecoveryEmail() {
   const data = await guardedAdminCall(() => api('/settings/codes'));
   if (data) state.admin.recoveryEmail = data.recoveryEmail;
 }
+async function loadUsers() {
+  const data = await guardedAdminCall(() => api('/users'));
+  if (data) state.admin.users = data;
+}
 
 async function enterAdminTab(tab) {
   state.adminTab = tab;
@@ -420,6 +448,7 @@ async function enterAdminTab(tab) {
   else if (tab === 'analytics') await loadGroups();
   else if (tab === 'groups') await loadCategories();
   else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories()]);
+  else if (tab === 'users') await Promise.all([loadUsers(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
   else if (tab === 'cash') await loadCashStatus();
   else if (tab === 'settings') await Promise.all([loadMaintenanceCounts(), loadRecoveryEmail()]);
@@ -469,6 +498,41 @@ async function pinPress(k) {
   renderOverlay();
 }
 
+async function posPinPress(k) {
+  if (k === 'del') { state.posPinBuf = state.posPinBuf.slice(0, -1); state.posPinError = ''; renderOverlay(); return; }
+  if (k === 'x') { state.showPosPin = false; state.posSelectedUserId = null; state.posPinBuf = ''; state.posPinError = ''; renderOverlay(); return; }
+  const buf = (state.posPinBuf + k).slice(0, 4);
+  state.posPinBuf = buf;
+  if (buf.length === 4) {
+    try {
+      const res = await api('/pos/login', { method: 'POST', body: { userId: state.posSelectedUserId, pin: buf } });
+      state.showPosPin = false; state.posPinBuf = ''; state.posPinError = ''; state.posSelectedUserId = null;
+      state.posUser = res.user;
+      renderOverlay();
+      await loadBootstrap();
+      renderHeader();
+      renderMain();
+      showToast('Angemeldet als ' + res.user.name);
+    } catch (e) {
+      state.posPinBuf = '';
+      state.posPinError = e.status === 429 ? 'Zu viele Fehlversuche · später erneut' : 'Falscher PIN';
+      renderOverlay();
+    }
+    return;
+  }
+  state.posPinError = '';
+  renderOverlay();
+}
+
+async function posSwitchUser() {
+  try { await api('/pos/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
+  state.posUser = null;
+  await loadBootstrap();
+  renderHeader();
+  renderMain();
+  showToast('Benutzer gewechselt');
+}
+
 /* ---------------------------------------------------------------------
  * Rendering — header
  * ------------------------------------------------------------------- */
@@ -490,6 +554,11 @@ function renderHeader() {
       <button data-action="go-pos" class="${state.view === 'pos' ? 'active' : ''}">Kasse</button>
       <button data-action="go-admin" class="${state.view === 'admin' ? 'active' : ''}">Verwaltung</button>
     </div>
+    ${state.posUsers.length ? `<div class="pos-user-badge">
+      ${state.posUser
+        ? `<span>${esc(state.posUser.name)}</span><button data-action="pos-switch-user">Wechseln</button>`
+        : `<span class="pos-user-none">Kein Benutzer angemeldet</span>`}
+    </div>` : ''}
     <div class="kpis">
       <div class="kpi"><div class="label">Kassenbestand</div><div class="value mono">${eur(state.cashBalanceCents)}</div></div>
       <div class="kpi"><div class="label">Umsatz heute</div><div class="value mono success">${eur(state.todayRevenueCents)}</div></div>
@@ -501,7 +570,18 @@ function renderHeader() {
 /* ---------------------------------------------------------------------
  * Rendering — POS
  * ------------------------------------------------------------------- */
+function renderPosUserSelect() {
+  document.getElementById('main-root').innerHTML = `
+  <div class="pos-user-select">
+    <div class="pos-user-select-title">Wer arbeitet an dieser Kasse?</div>
+    <div class="pos-user-tiles">
+      ${state.posUsers.map((u) => `<button data-action="pos-pick-user" data-id="${u.id}" class="pos-user-tile">${esc(u.name)}</button>`).join('')}
+    </div>
+  </div>`;
+}
+
 function renderPos() {
+  if (state.posUsers.length && !state.posUser) return renderPosUserSelect();
   const CATS_ORDER = ['Speisen', 'Getränke', 'Süßes'];
   const cats = ['Alle'].concat(
     CATS_ORDER.filter((c) => state.products.some((p) => p.category === c)),
@@ -599,7 +679,7 @@ function renderPos() {
  * Rendering — Admin
  * ------------------------------------------------------------------- */
 function adminTabsList() {
-  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
+  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
   return tabs.filter((t) => t[0] !== 'stock' || state.settings.trackStock);
 }
 
@@ -680,6 +760,33 @@ function renderGroupsTab() {
           <button data-action="delete-category" data-id="${c.id}" data-name="${esc(c.name)}" class="del">✕</button>
         </div>
       </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch keine Artikelgruppe angelegt.</div>'}
+    </div>`;
+}
+
+function renderUsersTab() {
+  const users = state.admin.users;
+  const cats = state.admin.categories;
+  if (!users || !cats) return '<p>Lädt…</p>';
+  return `
+    <div class="card-box">
+      <div class="table-head-row" style="padding:0 0 12px">
+        <div><div class="title">Benutzer</div><div class="subtitle">Steuert, welche Artikel an welcher Kasse angezeigt werden</div></div>
+        <button data-action="new-user" class="btn-primary">+ Neuer Benutzer</button>
+      </div>
+      ${users.map((u) => {
+        const scope = u.role === 'admin'
+          ? 'Sieht und bucht alle Artikel'
+          : (u.categoryIds.length
+            ? u.categoryIds.map((id) => (cats.find((c) => c.id === id) || {}).name).filter(Boolean).join(', ')
+            : 'Keine Artikelgruppe zugewiesen · sieht nichts');
+        return `<div class="settings-row" data-action="edit-user" data-id="${u.id}">
+          <div>
+            <div class="title">${esc(u.name)}${u.role === 'admin' ? ' <span class="badge-admin">Admin</span>' : ''}${!u.active ? ' <span class="badge-inactive">deaktiviert</span>' : ''}</div>
+            <div class="hint">${esc(scope)}</div>
+          </div>
+          <button data-action="delete-user" data-id="${u.id}" data-name="${esc(u.name)}" class="del">✕</button>
+        </div>`;
+      }).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch kein Benutzer angelegt · Kasse ist offen für alle.</div>'}
     </div>`;
 }
 
@@ -875,13 +982,14 @@ function renderSettingsTab() {
 
 function renderAdmin() {
   const tabs = adminTabsList();
-  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', articles: 'Artikel', stock: 'Bestand', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
+  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
   let content = '';
   if (state.adminTab === 'overview') content = renderOverviewTab();
   else if (state.adminTab === 'analytics') content = renderAnalyticsTab();
   else if (state.adminTab === 'groups') content = renderGroupsTab();
   else if (state.adminTab === 'articles') content = renderArticlesTab();
   else if (state.adminTab === 'stock') content = renderStockTab();
+  else if (state.adminTab === 'users') content = renderUsersTab();
   else if (state.adminTab === 'journal') content = renderJournalTab();
   else if (state.adminTab === 'cash') content = renderCashTab();
   else if (state.adminTab === 'settings') content = renderSettingsTab();
@@ -989,6 +1097,29 @@ function renderFormOverlay() {
       </div>`;
     }
     submitLabel = f.id ? 'Speichern' : 'Anlegen';
+  } else if (f.kind === 'user') {
+    title = f.id ? 'Benutzer bearbeiten' : 'Neuer Benutzer';
+    const cats = state.admin.categories || [];
+    fields = F('Name', 'name', 'z.B. Merch-Stand');
+    fields += `<div class="form-field"><label>Rolle</label><select data-form-key="role">
+      <option value="cashier" ${f.role === 'cashier' ? 'selected' : ''}>Kassierer · nur zugewiesene Artikelgruppen</option>
+      <option value="admin" ${f.role === 'admin' ? 'selected' : ''}>Admin · sieht und bucht alles</option>
+    </select></div>`;
+    fields += F(f.id ? 'Neuer PIN (leer = unverändert)' : 'PIN (4-stellig)', 'pin', '1234', 'password');
+    if (f.role === 'cashier') {
+      fields += `<div class="form-field"><label>Sichtbare Artikelgruppen</label>
+        <div class="checkbox-list">${cats.length
+          ? cats.map((c) => `<label class="checkbox-row"><input type="checkbox" data-action="toggle-form-category" data-cat-id="${c.id}" ${(f.categoryIds || []).includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('')
+          : '<div class="hint">Noch keine Artikelgruppe angelegt.</div>'}</div>
+      </div>`;
+    }
+    if (f.id) {
+      fields += `<div class="settings-row" data-action="toggle-form-active" style="padding:12px 0;cursor:pointer">
+        <div><div class="title" style="font-size:13px;font-weight:600">Aktiv</div><div class="hint" style="font-size:11px;color:var(--text-3)">Deaktivierte Benutzer können sich an der Kasse nicht mehr anmelden</div></div>
+        <div class="switch-track ${f.active ? 'on' : ''}"><div class="switch-knob"></div></div>
+      </div>`;
+    }
+    submitLabel = f.id ? 'Speichern' : 'Anlegen';
   } else if (f.kind === 'delivery') {
     title = 'Warenzugang · ' + f.name;
     fields = F('Menge', 'qty', '50') + F('Notiz / Lieferant', 'note', 'z.B. Metro');
@@ -1026,11 +1157,26 @@ function renderPinOverlay() {
   </div>`;
 }
 
+function renderPosPinOverlay() {
+  const user = state.posUsers.find((u) => u.id === state.posSelectedUserId);
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'x', '0', 'del'];
+  return `<div class="overlay">
+    <div class="pin-card">
+      <div class="pin-title">${esc(user ? user.name : 'Anmelden')}</div>
+      <div class="pin-sub">PIN eingeben</div>
+      <div class="pin-dots">${[0, 1, 2, 3].map((i) => `<div class="pin-dot ${i < state.posPinBuf.length ? 'filled' : ''}"></div>`).join('')}</div>
+      <div class="pin-error">${esc(state.posPinError)}</div>
+      <div class="pin-keys">${keys.map((k) => `<button data-action="pos-pin-press" data-key="${k}" class="${k === 'x' || k === 'del' ? 'ghost' : ''}">${k === 'del' ? '⌫' : k === 'x' ? 'Abbr.' : k}</button>`).join('')}</div>
+    </div>
+  </div>`;
+}
+
 function renderOverlay() {
   const el = document.getElementById('overlay-root');
   if (state.receipt) el.innerHTML = renderReceiptOverlay();
   else if (state.form) el.innerHTML = renderFormOverlay();
   else if (state.showPin) el.innerHTML = renderPinOverlay();
+  else if (state.showPosPin) el.innerHTML = renderPosPinOverlay();
   else el.innerHTML = '';
 
   if (state.form) {
@@ -1042,6 +1188,9 @@ function renderOverlay() {
         if (input.dataset.formKey === 'category' && state.form.kind === 'article' && !state.form.id) {
           const cat = (state.admin.categories || []).find((c) => c.name === input.value);
           if (cat) { state.form.trackStock = cat.trackStockDefault; renderOverlay(); }
+        }
+        if (input.dataset.formKey === 'role' && state.form.kind === 'user') {
+          renderOverlay();
         }
       });
     });
@@ -1094,6 +1243,9 @@ function onAction(e) {
     case 'close-form': return closeForm();
     case 'submit-form': return void submitForm();
     case 'pin-press': return void pinPress(d.key);
+    case 'pos-pick-user': state.posSelectedUserId = Number(d.id); state.showPosPin = true; state.posPinBuf = ''; state.posPinError = ''; return renderOverlay();
+    case 'pos-pin-press': return void posPinPress(d.key);
+    case 'pos-switch-user': return void posSwitchUser();
     case 'forgot-code': return void api('/access/forgot', { method: 'POST' })
       .then(() => showToast('E-Mail verschickt · Link ist 30 Minuten gültig'))
       .catch((e) => showToast(e.message));
@@ -1135,6 +1287,32 @@ function onAction(e) {
       },
     });
     case 'toggle-form-trackstockdefault': state.form.trackStockDefault = !state.form.trackStockDefault; return renderOverlay();
+    case 'new-user': return openForm({ kind: 'user', name: '', role: 'cashier', pin: '', categoryIds: [], active: true });
+    case 'edit-user': {
+      const u = state.admin.users.find((x) => x.id === Number(d.id));
+      if (!u) return;
+      return openForm({ kind: 'user', id: u.id, name: u.name, role: u.role, pin: '', categoryIds: u.categoryIds.slice(), active: u.active });
+    }
+    case 'toggle-form-category': {
+      const cid = Number(d.catId);
+      const list = state.form.categoryIds || (state.form.categoryIds = []);
+      const idx = list.indexOf(cid);
+      if (idx >= 0) list.splice(idx, 1); else list.push(cid);
+      return;
+    }
+    case 'toggle-form-active': state.form.active = !state.form.active; return renderOverlay();
+    case 'delete-user': return openForm({
+      kind: 'confirm', code: '', title: 'Benutzer löschen · ' + d.name,
+      hint: 'Der Benutzer kann sich danach nicht mehr an der Kasse anmelden.',
+      submitLabel: 'Benutzer löschen',
+      action: async (code) => {
+        await api('/users/' + d.id, { method: 'DELETE', body: { deleteCode: code } });
+        showToast('Benutzer gelöscht');
+        await Promise.all([loadUsers(), loadBootstrap()]);
+        renderHeader();
+        renderMain();
+      },
+    });
     case 'export-articles': window.location.href = '/api/products/export'; return;
     case 'import-articles': return void document.getElementById('import-file-input').click();
     case 'new-article': {

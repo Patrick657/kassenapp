@@ -140,6 +140,40 @@ like a limited print run of 100 T-shirts that must be).
   without limit, no badge, excluded from Bestand and stock-value figures, same as when the global
   toggle used to be the only switch.
 
+## Mehrere Benutzer / Kassenrollen
+
+Added at the operator's request: a festival typically runs more than one register from one shared
+article catalog (e.g. a merch stand and a food/drinks stand), and each station should only see the
+articles relevant to it. This is a **separate, independent layer** from the Zugangscode/
+Löschkennwort pair that guards Verwaltung — that system is unchanged; this one only controls what a
+register's POS screen shows and may sell.
+
+- **`users` table** (migration v5): `name`, a 4-digit `pin_hash`, `role` (`admin` or `cashier`),
+  `active`. **`user_categories`** maps a `cashier`-role user to the article groups they may sell —
+  an `admin`-role user always sees and books everything, ignoring any group assignment. **`pos_sessions`**
+  holds the long-lived per-device login (see below).
+- **Bootstrap-open, same pattern as the access code**: as long as zero users exist, the POS behaves
+  exactly as before — open, unfiltered, no login screen — so this feature is entirely opt-in and
+  doesn't affect anyone who hasn't set up any users. It closes automatically the moment the first
+  user is created in Verwaltung → **Benutzer**.
+- **"Wer arbeitet an dieser Kasse?"**: once at least one user exists, a device without an active POS
+  login sees a name-tile picker instead of the article grid; picking a name prompts a 4-digit PIN
+  (same pad as the admin unlock). On success the device stays logged in as that user **until
+  someone taps "Wechseln"** — deliberately no timeout, since the intent is "this iPad is the merch
+  stand for the whole day," not a per-transaction login.
+- **Enforced server-side, not just hidden in the UI**: `GET /api/bootstrap` filters the `products`
+  list by the current device's allowed groups, and `POST /api/sales` independently re-checks every
+  cart line's article group against the same list before booking the sale — a cashier device can't
+  be tricked into selling an out-of-scope article via a direct API call, only via the UI staying in
+  sync with what it's shown.
+- **Verwaltung → Benutzer** manages accounts: create/edit name, role, PIN, and (for `cashier`) which
+  article groups they see; deactivating or deleting a user only affects future POS logins, not
+  historical sales (sales aren't attributed to a user — this controls visibility, not accounting).
+  Deleting a user requires the Löschkennwort, same as deleting an article.
+- Rate-limited through the same shared bucket as the access/delete codes and the reset-link request
+  (`Auth::checkRateLimit()`/`recordAttempt()`) — a 4-digit PIN is guessable, and it's one more
+  PIN-guessing surface on the same IP-based throttle.
+
 ## Artikelnummer (SKU) und CSV Export/Import
 
 Optional `sku` field per article (migration v3, `products.sku VARCHAR(60) NULL`, no uniqueness
@@ -225,7 +259,7 @@ underneath doesn't change either way.
   The bypass closes the moment a code is saved.
 - Everything else — layout, colors, spacing, copy, the discount/tender/change-breakdown logic, the
   Z-report/close semantics, the two-factor delete flow — mirrors `Kassen-App.dc.html` and
-  `design_handoff_festkasse/README.md` as closely as the stack change allows.
+  `design/project/design_handoff_festkasse/README.md` as closely as the stack change allows.
 
 ## Smoke-testing after deploy
 

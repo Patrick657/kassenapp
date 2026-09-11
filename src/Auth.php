@@ -216,6 +216,100 @@ final class Auth
         return $this->attempt($newAccessCode);
     }
 
+    private const POS_COOKIE = 'festkasse_pos_user';
+    private const POS_SESSION_DAYS = 365;
+
+    /** Active POS login accounts for the "Wer arbeitet an dieser Kasse?" picker — names only, no PIN hashes. */
+    public function posUsers(): array
+    {
+        $rows = $this->db->query('SELECT id, name, role FROM users WHERE active = 1 ORDER BY sort_order ASC, id ASC')->fetchAll();
+        return array_map(static fn ($r) => ['id' => (int) $r['id'], 'name' => $r['name'], 'role' => $r['role']], $rows);
+    }
+
+    /** @return array{id:int,name:string,role:string}|null */
+    public function posCurrentUser(): ?array
+    {
+        $token = $_COOKIE[self::POS_COOKIE] ?? null;
+        if (!$token) {
+            return null;
+        }
+        $stmt = $this->db->prepare(
+            'SELECT u.id, u.name, u.role FROM pos_sessions s
+             JOIN users u ON u.id = s.user_id AND u.active = 1
+             WHERE s.token_hash = ? AND s.revoked_at IS NULL'
+        );
+        $stmt->execute([hash('sha256', $token)]);
+        $row = $stmt->fetch();
+        return $row ? ['id' => (int) $row['id'], 'name' => $row['name'], 'role' => $row['role']] : null;
+    }
+
+    /**
+     * Logs a device in as a POS user for the whole shift ("bis manuell gewechselt" — no 2h
+     * timeout like the admin access code). Shares the same IP rate-limit bucket as the access
+     * and delete codes: it is another PIN-guessing surface and needs the same throttle.
+     * @return array{user:array{id:int,name:string,role:string}}
+     */
+    public function posLogin(int $userId, string $pin): array
+    {
+        $ip = Support::clientIp();
+        $this->checkRateLimit($ip);
+        $stmt = $this->db->prepare('SELECT id, name, role, pin_hash FROM users WHERE id = ? AND active = 1');
+        $stmt->execute([$userId]);
+        $user = $stmt->fetch();
+        $ok = $user && password_verify($pin, $user['pin_hash']);
+        $this->recordAttempt($ip, (bool) $ok);
+        if (!$ok) {
+            throw new ApiException(401, 'Falscher PIN');
+        }
+        $token = bin2hex(random_bytes(32));
+        $stmt = $this->db->prepare('INSERT INTO pos_sessions (token_hash, user_id, created_at) VALUES (?, ?, NOW())');
+        $stmt->execute([hash('sha256', $token), $user['id']]);
+        setcookie(self::POS_COOKIE, $token, [
+            'expires' => time() + 60 * 60 * 24 * self::POS_SESSION_DAYS,
+            'path' => '/',
+            'httponly' => true,
+            'secure' => $this->https,
+            'samesite' => 'Strict',
+        ]);
+        return ['user' => ['id' => (int) $user['id'], 'name' => $user['name'], 'role' => $user['role']]];
+    }
+
+    /** "Benutzer wechseln" — no PIN needed, anyone at the register may hand it to the next person. */
+    public function posLogout(): void
+    {
+        $token = $_COOKIE[self::POS_COOKIE] ?? null;
+        if ($token) {
+            $this->db->prepare('UPDATE pos_sessions SET revoked_at = NOW() WHERE token_hash = ?')->execute([hash('sha256', $token)]);
+        }
+        setcookie(self::POS_COOKIE, '', ['expires' => time() - 3600, 'path' => '/']);
+    }
+
+    /**
+     * Article group names the current device may sell, or null when unrestricted — either no
+     * users have been configured yet (feature unused, POS stays fully open, same bootstrap-open
+     * pattern as the access code) or the logged-in user has the 'admin' role. An empty array
+     * means "cashier logged in but assigned no groups yet" — deliberately locks the register to
+     * nothing rather than defaulting to open.
+     */
+    public function posAllowedCategories(): ?array
+    {
+        if ((int) $this->db->query('SELECT COUNT(*) FROM users WHERE active = 1')->fetchColumn() === 0) {
+            return null;
+        }
+        $user = $this->posCurrentUser();
+        if ($user === null) {
+            return [];
+        }
+        if ($user['role'] === 'admin') {
+            return null;
+        }
+        $stmt = $this->db->prepare(
+            'SELECT c.name FROM user_categories uc JOIN categories c ON c.id = uc.category_id WHERE uc.user_id = ?'
+        );
+        $stmt->execute([$user['id']]);
+        return array_map(static fn ($r) => $r['name'], $stmt->fetchAll());
+    }
+
     /** Second factor for destructive actions — never cached, checked on every call. */
     public function verifyDeleteCode(?string $code): void
     {
