@@ -73,23 +73,33 @@ final class Auth
     }
 
     /**
-     * A 'cashier'-role POS login is register-only, full stop — it must never reach Verwaltung,
-     * even if it happens to know the access code (e.g. written down and shared by accident).
-     * Checked before the code is even accepted, not just before protected actions, so a cashier
-     * device can't end up "unlocked" yet 403ing on every subsequent call.
+     * Verwaltung is for the 'admin' case, full stop — a 'cashier' login must never reach it, and
+     * neither may a device with no POS login at all, even knowing the access code, once at least
+     * one admin-role account exists. Checked before the code is even accepted, not just before
+     * protected actions, so a device can't end up "unlocked" yet 403ing on every subsequent call.
+     *
+     * Exception: while zero admin-role accounts exist yet, the access code alone still opens
+     * Verwaltung (same bootstrap-open pattern as the code itself) — otherwise nobody could ever
+     * create that first admin account once the multi-user feature is turned on.
      */
-    private function assertNotCashierDevice(): void
+    private function assertVerwaltungAllowed(): void
     {
+        $hasAdminUser = (int) $this->db->query(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1"
+        )->fetchColumn() > 0;
+        if (!$hasAdminUser) {
+            return;
+        }
         $posUser = $this->posCurrentUser();
-        if ($posUser !== null && $posUser['role'] === 'cashier') {
-            throw new ApiException(403, 'Verwaltung ist für diesen Benutzer nicht verfügbar');
+        if ($posUser === null || $posUser['role'] !== 'admin') {
+            throw new ApiException(403, 'Verwaltung ist gesperrt · bitte als Admin an der Kasse anmelden');
         }
     }
 
     /** @return array{expiresAt:string} */
     public function attempt(string $code): array
     {
-        $this->assertNotCashierDevice();
+        $this->assertVerwaltungAllowed();
         $ip = Support::clientIp();
         $this->checkRateLimit($ip);
         $hash = $this->setting('access_code_hash');
@@ -132,12 +142,12 @@ final class Auth
      * Throws 401 unless a valid, non-expired access session exists. Skipped if require_code is off,
      * and also skipped on a fresh install with no access code configured yet — otherwise nobody could
      * ever reach Verwaltung to set the first code (there's no CLI/SSH on some shared hosts). Once a
-     * code is set, this bootstrap bypass closes automatically. The cashier-device check runs first
-     * and is never skipped by require_code=0 — it's a separate, stronger boundary.
+     * code is set, this bootstrap bypass closes automatically. The Verwaltung/admin-login check
+     * runs first and is never skipped by require_code=0 — it's a separate, stronger boundary.
      */
     public function requireAccess(): void
     {
-        $this->assertNotCashierDevice();
+        $this->assertVerwaltungAllowed();
         if (($this->setting('require_code') ?? '1') === '0') {
             return;
         }
@@ -278,9 +288,15 @@ final class Auth
         if (!$ok) {
             throw new ApiException(401, 'Falscher PIN');
         }
+        $this->issuePosSession((int) $user['id']);
+        return ['user' => ['id' => (int) $user['id'], 'name' => $user['name'], 'role' => $user['role']]];
+    }
+
+    private function issuePosSession(int $userId): void
+    {
         $token = bin2hex(random_bytes(32));
         $stmt = $this->db->prepare('INSERT INTO pos_sessions (token_hash, user_id, created_at) VALUES (?, ?, NOW())');
-        $stmt->execute([hash('sha256', $token), $user['id']]);
+        $stmt->execute([hash('sha256', $token), $userId]);
         setcookie(self::POS_COOKIE, $token, [
             'expires' => time() + 60 * 60 * 24 * self::POS_SESSION_DAYS,
             'path' => '/',
@@ -288,7 +304,18 @@ final class Auth
             'secure' => $this->https,
             'samesite' => 'Strict',
         ]);
-        return ['user' => ['id' => (int) $user['id'], 'name' => $user['name'], 'role' => $user['role']]];
+    }
+
+    /**
+     * Auto-logs this device in as a newly-created 'admin' POS account, skipping the PIN check —
+     * used only right after Verwaltung (already legitimately open, via the bootstrap access-code
+     * door) creates the very first admin account. Without this, that same Verwaltung session would
+     * immediately 403 on its own next request, since creating that account closes the bootstrap
+     * door behind it (see assertVerwaltungAllowed()).
+     */
+    public function posAutoLoginAsNewAdmin(int $userId): void
+    {
+        $this->issuePosSession($userId);
     }
 
     /** "Benutzer wechseln" — no PIN needed, anyone at the register may hand it to the next person. */

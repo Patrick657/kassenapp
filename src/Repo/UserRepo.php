@@ -55,6 +55,11 @@ final class UserRepo
         return $this->categoryIdsForUsers([$userId])[$userId] ?? [];
     }
 
+    public function hasActiveAdmin(): bool
+    {
+        return (int) $this->db->query("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1")->fetchColumn() > 0;
+    }
+
     public function find(int $id): ?array
     {
         $stmt = $this->db->prepare('SELECT * FROM users WHERE id = ?');

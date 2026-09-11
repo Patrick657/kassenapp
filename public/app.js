@@ -342,8 +342,9 @@ async function submitForm() {
       await guardedAdminCall(() => (f.id ? api('/users/' + f.id, { method: 'PATCH', body }) : api('/users', { method: 'POST', body })));
       closeForm();
       showToast(f.id ? 'Benutzer gespeichert' : 'Benutzer angelegt');
-      await Promise.all([loadUsers(), loadBootstrap()]);
+      await reloadUsersAndBootstrap();
       renderHeader();
+      kickOutIfVerwaltungNowLocked();
       renderMain();
       return;
     }
@@ -458,7 +459,7 @@ async function enterAdminTab(tab) {
 function goPos() { state.view = 'pos'; renderHeader(); renderMain(); }
 async function goAdmin() {
   if (!canUseAdmin()) {
-    showToast('Verwaltung ist für diesen Benutzer nicht verfügbar');
+    showToast(state.posUser ? 'Verwaltung ist für diesen Benutzer nicht verfügbar' : 'Verwaltung ist gesperrt · bitte als Admin an der Kasse anmelden');
     return;
   }
   if (state.settings.requireCode && state.access.codeConfigured && !state.access.unlocked) {
@@ -554,7 +555,38 @@ function lockLabel() {
 }
 
 function canUseAdmin() {
-  return !(state.posUser && state.posUser.role === 'cashier');
+  const hasAdminUser = state.posUsers.some((u) => u.role === 'admin');
+  if (!hasAdminUser) return true; // no admin POS account set up yet — access code alone still works
+  return !!(state.posUser && state.posUser.role === 'admin');
+}
+
+/**
+ * Creating the first admin-role POS account closes the "access code alone" bootstrap door
+ * immediately — if nobody on this device is logged in as that account yet, the very next admin
+ * API call would otherwise silently 403. Kick back to Kasse with a clear explanation instead of
+ * leaving Verwaltung sitting there half-broken.
+ */
+function kickOutIfVerwaltungNowLocked() {
+  if (state.view === 'admin' && !canUseAdmin()) {
+    state.view = 'pos';
+    state.adminTab = 'overview';
+    showToast('Verwaltung ist jetzt an eine Admin-Anmeldung an der Kasse gebunden · bitte anmelden');
+  }
+}
+
+/**
+ * Reloads the Benutzer list + bootstrap after a create/edit/delete. bootstrap() has no requireAccess()
+ * gate, so it always succeeds and is what canUseAdmin()/kickOutIfVerwaltungNowLocked() need; the
+ * users list can legitimately 403 here too (e.g. an admin removing their own admin-role account
+ * while others exist) — swallow only that case rather than leaving the view stuck mid-refresh.
+ */
+async function reloadUsersAndBootstrap() {
+  await loadBootstrap();
+  try {
+    await loadUsers();
+  } catch (e) {
+    if (e.status !== 403) throw e;
+  }
 }
 
 function renderHeader() {
@@ -1320,8 +1352,9 @@ function onAction(e) {
       action: async (code) => {
         await api('/users/' + d.id, { method: 'DELETE', body: { deleteCode: code } });
         showToast('Benutzer gelöscht');
-        await Promise.all([loadUsers(), loadBootstrap()]);
+        await reloadUsersAndBootstrap();
         renderHeader();
+        kickOutIfVerwaltungNowLocked();
         renderMain();
       },
     });

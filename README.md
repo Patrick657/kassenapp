@@ -172,15 +172,25 @@ reserved for `admin`-role logins (or the Zugangscode alone, when the feature isn
 - Rate-limited through the same shared bucket as the access/delete codes and the reset-link request
   (`Auth::checkRateLimit()`/`recordAttempt()`) — a 4-digit PIN is guessable, and it's one more
   PIN-guessing surface on the same IP-based throttle.
-- **A `cashier`-role login can never reach Verwaltung — enforced server-side, not just a hidden
+- **Verwaltung requires an `admin`-role POS login — enforced server-side, not just a hidden
   button.** `Auth::requireAccess()` (every protected route) and `Auth::attempt()` (entering the
-  Zugangscode itself) both reject with 403 while the device's current POS login is a `cashier`,
-  even if that device happens to know the Zugangscode — the PIN wasn't even accepted, so there's no
-  confusing "unlocked yet everything 403s" state. This check runs *before* the `require_code`
-  toggle and can't be switched off by it; it's a separate, stronger boundary. An `admin`-role POS
-  login, or no POS login at all (feature unused, or logged out), still goes through the normal
-  Zugangscode flow unchanged. The frontend mirrors this by hiding the "Verwaltung" tab entirely
-  for a `cashier` login (`canUseAdmin()` in `app.js`).
+  Zugangscode itself) both reject with 403 (`Auth::assertVerwaltungAllowed()`) unless the device's
+  current POS login has role `admin` — a `cashier` login is blocked, and so is *no* POS login at
+  all, even if the device happens to know the Zugangscode. The PIN isn't even accepted in that
+  case, so there's no confusing "unlocked yet everything 403s" state. This check runs *before* the
+  `require_code` toggle and can't be switched off by it — a separate, stronger boundary. The
+  frontend mirrors it by hiding the "Verwaltung" tab whenever it would 403 (`canUseAdmin()` in
+  `app.js`).
+  - **Bootstrap exception**: while zero `admin`-role accounts exist yet, the Zugangscode alone
+    still opens Verwaltung — same escape hatch as the code itself — otherwise nobody could ever
+    create that first admin account once the feature is turned on.
+  - **Auto-login on that first admin account**: creating it (from that bootstrap-open session)
+    would otherwise immediately lock the very session that just created it out of its own next
+    request, since the bootstrap door closes the moment an admin account exists. `POST /api/users`
+    detects exactly that case and calls `Auth::posAutoLoginAsNewAdmin()`, logging the device in as
+    the new account with no PIN prompt — the operator just keeps working.
+  - Deployments that never create any users are completely unaffected — Verwaltung keeps working
+    via the Zugangscode alone, exactly as before this feature existed.
 
 ## Artikelnummer (SKU) und CSV Export/Import
 

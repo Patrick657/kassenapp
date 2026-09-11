@@ -117,12 +117,21 @@ final class Api
             }
             if ($method === 'POST') {
                 $b = Support::jsonBody();
+                $role = (string) ($b['role'] ?? 'cashier');
+                // Creating the very first admin account closes the bootstrap access-code door
+                // behind it (see Auth::assertVerwaltungAllowed()) — auto-login this device as it
+                // right away so the still-open Verwaltung session doesn't lock itself out on its
+                // very next request.
+                $autoLogin = $role === 'admin' && !$this->users->hasActiveAdmin() && $this->auth->posCurrentUser() === null;
                 $id = $this->users->create(
                     (string) ($b['name'] ?? ''),
                     (string) ($b['pin'] ?? ''),
-                    (string) ($b['role'] ?? 'cashier'),
+                    $role,
                     (array) ($b['categoryIds'] ?? [])
                 );
+                if ($autoLogin) {
+                    $this->auth->posAutoLoginAsNewAdmin($id);
+                }
                 $this->audit->log('user.create', 'Benutzer angelegt: ' . (string) ($b['name'] ?? ''));
                 return ['id' => $id];
             }
