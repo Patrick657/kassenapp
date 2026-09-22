@@ -805,7 +805,7 @@ final class Api
             $color = $r['type'] === 'delivery' ? null : ($r['amountCents'] > 0 ? Pdf::GREEN : ($r['amountCents'] < 0 ? Pdf::RED : null));
 
             $header = 'Nr. ' . ($r['receiptNo'] ?? '–') . '  ·  ' . $type . '  ·  ' . $when . ' Uhr';
-            $pdf->addLine(Support::padDisplay($header, 80) . Support::padDisplayRight($amount, 12), true, color: $color);
+            $pdf->addSplitLine($header, $amount, bold: true, rightColor: $color);
 
             if (!empty($r['lines'])) {
                 foreach ($r['lines'] as $line) {
@@ -814,7 +814,7 @@ final class Api
                     );
                 }
             } elseif ($r['note'] !== '') {
-                $pdf->addLine('  ' . $r['note'], color: Pdf::GRAY);
+                $pdf->addLine('  ' . $r['note']);
             }
             $pdf->addSpacer(5.0);
         }

@@ -23,7 +23,6 @@ final class Pdf
     public const RED = [0.75, 0.15, 0.15];
     public const WHITE = [1.0, 1.0, 1.0];
     public const BLACK = [0.0, 0.0, 0.0];
-    public const GRAY = [0.45, 0.45, 0.45];
 
     /** Roughly how many Courier characters fit one line at BODY_SIZE within the margins. */
     public const CHARS_PER_LINE = 92;
@@ -64,6 +63,33 @@ final class Pdf
     public function addSpacer(float $height = self::BODY_LEADING): void
     {
         $this->y -= $height;
+    }
+
+    /**
+     * One line with an independently-coloured, right-aligned trailing segment — e.g. a bold
+     * transaction header where only the amount should stand out in green/red, not the whole
+     * line. Courier is fixed-pitch (each glyph is exactly 0.6× the font size wide per the
+     * standard Type1 metrics), so the right segment's width is computable without measuring.
+     * @param ?array{0:float,1:float,2:float} $leftColor null = black
+     * @param ?array{0:float,1:float,2:float} $rightColor null = black
+     */
+    public function addSplitLine(
+        string $left,
+        string $right,
+        bool $bold = false,
+        ?array $leftColor = null,
+        ?array $rightColor = null,
+        float $size = self::BODY_SIZE
+    ): void {
+        $leading = max(self::BODY_LEADING, $size + 3.0);
+        if ($this->y - $leading < self::MARGIN) {
+            $this->startPage();
+        }
+        $rightWidth = mb_strlen($right, 'UTF-8') * ($size * 0.6);
+        $rightX = self::WIDTH - self::MARGIN - $rightWidth;
+        $this->currentOps[] = ['type' => 'text', 'x' => self::MARGIN, 'y' => $this->y, 'text' => $left, 'bold' => $bold, 'size' => $size, 'color' => $leftColor ?? self::BLACK];
+        $this->currentOps[] = ['type' => 'text', 'x' => $rightX, 'y' => $this->y, 'text' => $right, 'bold' => $bold, 'size' => $size, 'color' => $rightColor ?? self::BLACK];
+        $this->y -= $leading;
     }
 
     /** @param string[] $lines */
@@ -174,7 +200,7 @@ final class Pdf
                     $color[2],
                     $font,
                     $op['size'],
-                    self::MARGIN,
+                    $op['x'] ?? self::MARGIN,
                     $op['y'],
                     $this->escapeText($op['text'])
                 );
