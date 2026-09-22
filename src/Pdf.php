@@ -24,9 +24,6 @@ final class Pdf
     public const WHITE = [1.0, 1.0, 1.0];
     public const BLACK = [0.0, 0.0, 0.0];
 
-    /** Roughly how many Courier characters fit one line at BODY_SIZE within the margins. */
-    public const CHARS_PER_LINE = 92;
-
     /** @var array<int, array<int, array<string, mixed>>> one array of draw-ops per page */
     private array $pages = [];
     /** @var array<int, array<string, mixed>> */
@@ -107,8 +104,9 @@ final class Pdf
      * line's bold capitals graze the rule instead of sitting cleanly below it.
      * @param array{0:float,1:float,2:float} $color
      */
-    public function addRule(array $color = [0.85, 0.85, 0.85], float $thickness = 0.75, float $spacingAfter = 7.0): void
+    public function addRule(array $color = [0.85, 0.85, 0.85], float $thickness = 0.75, float $spacingBefore = 3.0, float $spacingAfter = 7.0): void
     {
+        $this->y -= $spacingBefore;
         if ($this->y - $thickness < self::MARGIN) {
             $this->startPage();
         }

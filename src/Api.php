@@ -811,9 +811,7 @@ final class Api
 
             if (!empty($r['lines'])) {
                 foreach ($r['lines'] as $line) {
-                    $pdf->addLine(
-                        '  ' . Support::padDisplay($line['label'], 78) . Support::padDisplayRight(Support::eur($line['amountCents']), 12)
-                    );
+                    $pdf->addSplitLine('  ' . Support::padDisplay($line['label'], 85), Support::eur($line['amountCents']));
                 }
             } elseif ($r['note'] !== '') {
                 $pdf->addLine('  ' . $r['note']);
@@ -928,13 +926,19 @@ final class Api
 
         $sales = $this->zReports->salesFor($z['no']);
         $pdf->addLine('Verkäufe', true);
-        $pdf->addLine(Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Zahlung', 10) . Support::padDisplayRight('Betrag', 11), true);
+        $pdf->addSplitLine(
+            Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Zahlung', 10),
+            'Betrag',
+            bold: true
+        );
         $pdf->addRule();
         foreach ($sales as $s) {
-            $pdf->addLine(
+            $pdf->addSplitLine(
                 Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
-                . Support::padDisplay($s['payment'] === 'card' ? 'Karte' : 'Bar', 10) . Support::padDisplayRight(Support::eur($s['totalCents']), 11),
-                color: Pdf::GREEN
+                . Support::padDisplay($s['payment'] === 'card' ? 'Karte' : 'Bar', 10),
+                Support::eur($s['totalCents']),
+                leftColor: Pdf::GREEN,
+                rightColor: Pdf::GREEN
             );
             $pdf->addRule();
         }
