@@ -101,6 +101,29 @@ final class Pdf
     }
 
     /**
+     * A hairline row separator spanning the full content width — light gray by default, thin
+     * enough to organise a listing into a table without a heavy boxed-in look. $spacingAfter
+     * must clear Courier's cap-height (~0.56× the body size, so ~5pt at BODY_SIZE) or the next
+     * line's bold capitals graze the rule instead of sitting cleanly below it.
+     * @param array{0:float,1:float,2:float} $color
+     */
+    public function addRule(array $color = [0.85, 0.85, 0.85], float $thickness = 0.75, float $spacingAfter = 7.0): void
+    {
+        if ($this->y - $thickness < self::MARGIN) {
+            $this->startPage();
+        }
+        $this->currentOps[] = [
+            'type' => 'rect',
+            'x' => self::MARGIN,
+            'y' => $this->y - $thickness,
+            'w' => self::WIDTH - 2 * self::MARGIN,
+            'h' => $thickness,
+            'color' => $color,
+        ];
+        $this->y -= $thickness + $spacingAfter;
+    }
+
+    /**
      * A full-width coloured banner (e.g. a Z-Bericht's Endstand) — never split across a page
      * break: if it wouldn't fit in the space left on the current page, a fresh page starts first.
      * @param array<int, array{text: string, bold?: bool, size?: float}> $lines

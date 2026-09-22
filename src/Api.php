@@ -798,6 +798,8 @@ final class Api
         // One card per Vorgang, using the full line width: a bold, coloured header (Nr. · Typ ·
         // Datum/Zeit, amount right-aligned) followed by one line per purchased article or
         // returned Pfand-Option — never a single run-on summary that could overflow the margin.
+        // A light hairline after each card turns the listing into a table without a heavy border.
+        $pdf->addRule();
         foreach ($rows as $r) {
             $when = (new \DateTime($r['occurredAt']))->format('d.m.Y H:i');
             $type = self::JOURNAL_TAG_TEXT[$r['type']] ?? $r['type'];
@@ -816,7 +818,7 @@ final class Api
             } elseif ($r['note'] !== '') {
                 $pdf->addLine('  ' . $r['note']);
             }
-            $pdf->addSpacer(5.0);
+            $pdf->addRule();
         }
         if (empty($rows)) {
             $pdf->addLine('Noch keine Kassenbewegungen.');
@@ -927,13 +929,14 @@ final class Api
         $sales = $this->zReports->salesFor($z['no']);
         $pdf->addLine('Verkäufe', true);
         $pdf->addLine(Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Zahlung', 10) . Support::padDisplayRight('Betrag', 11), true);
-        $pdf->addLine(str_repeat('-', 53));
+        $pdf->addRule();
         foreach ($sales as $s) {
             $pdf->addLine(
                 Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
                 . Support::padDisplay($s['payment'] === 'card' ? 'Karte' : 'Bar', 10) . Support::padDisplayRight(Support::eur($s['totalCents']), 11),
                 color: Pdf::GREEN
             );
+            $pdf->addRule();
         }
         if (empty($sales)) {
             $pdf->addLine('Keine Verkäufe in diesem Zeitraum.');
