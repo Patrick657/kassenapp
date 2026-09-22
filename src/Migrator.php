@@ -45,10 +45,21 @@ final class Migrator
             $this->migrateToV5();
             $this->setVersion(5);
         }
+
+        // v6 collided with a since-discarded, differently-shaped implementation that had already
+        // run its OWN "version 6" on some installs before this code replaced it (own deposits
+        // table, products.deposit_name/deposit_cents — see migrateToV6()'s docblock). Wherever
+        // that happened, schema_version already reads >= 6, so the `$current < 6` gate below would
+        // silently skip this version forever and this app's own sale_items.deposit_cents /
+        // sales.deposit_cents / the deposit_return enum value would never get added — exactly what
+        // broke checkout. Run it unconditionally instead; every statement inside is independently
+        // idempotent (ensureColumn checks first, the ENUM MODIFY is a harmless no-op if re-applied),
+        // so this is safe and cheap to repeat on every request regardless of what the counter says.
+        $this->migrateToV6();
         if ($current < 6) {
-            $this->migrateToV6();
             $this->setVersion(6);
         }
+
         if ($current < 7) {
             $this->migrateToV7();
             $this->setVersion(7);
@@ -57,13 +68,24 @@ final class Migrator
             $this->migrateToV8();
             $this->setVersion(8);
         }
+        // v9/v10 each wrapped individually: on an install already stuck here (v9 used to throw
+        // before sales.deposit_cents existed, which aborted this whole method and meant v10 never
+        // even got attempted), one step failing must never cost the next one its chance to run.
         if ($current < 9) {
-            $this->migrateToV9();
-            $this->setVersion(9);
+            try {
+                $this->migrateToV9();
+                $this->setVersion(9);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v9 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
         }
         if ($current < 10) {
-            $this->migrateToV10();
-            $this->setVersion(10);
+            try {
+                $this->migrateToV10();
+                $this->setVersion(10);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v10 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
         }
     }
 
