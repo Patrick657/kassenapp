@@ -292,6 +292,17 @@ final class Migrator
         }
     }
 
+    /**
+     * Best-effort only — a foreign key is a data-integrity nicety the app's own PHP code never
+     * relies on (nothing checks that the constraint exists), unlike the columns ensureColumn()
+     * adds, which the app genuinely can't run without. Some shared-hosting DB users lack the
+     * privilege to add foreign keys at all (REFERENCES, or a restricted ALTER grant); if that
+     * ALTER throws, swallow it and move on rather than letting it abort the whole migration step
+     * — the columns before it in the same migrateToVN() must still land and schema_version must
+     * still advance, or every later migration stays permanently stuck retrying (and failing) this
+     * same statement on every request, which is exactly what breaks checkout: sales/cash_movements
+     * columns added in a *later* step never get the chance to exist.
+     */
     private function ensureForeignKey(string $table, string $constraintName, string $alterSql): void
     {
         $stmt = $this->db->prepare(
@@ -299,8 +310,13 @@ final class Migrator
              WHERE table_schema = DATABASE() AND table_name = ? AND constraint_name = ? AND constraint_type = 'FOREIGN KEY'"
         );
         $stmt->execute([$table, $constraintName]);
-        if ((int) $stmt->fetchColumn() === 0) {
+        if ((int) $stmt->fetchColumn() > 0) {
+            return;
+        }
+        try {
             $this->db->exec($alterSql);
+        } catch (\Throwable $e) {
+            error_log('[Festkasse Migrator] Foreign Key ' . $constraintName . ' konnte nicht angelegt werden (übersprungen): ' . $e->getMessage());
         }
     }
 
