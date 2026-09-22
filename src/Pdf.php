@@ -104,8 +104,23 @@ final class Pdf
      * line's bold capitals graze the rule instead of sitting cleanly below it.
      * @param array{0:float,1:float,2:float} $color
      */
-    public function addRule(array $color = [0.85, 0.85, 0.85], float $thickness = 0.75, float $spacingBefore = 3.0, float $spacingAfter = 7.0): void
+    /**
+     * $gap is the visual whitespace the rule keeps clear of the *glyphs* around it, on both
+     * sides equally — not a raw cursor movement. The line above already leaves BODY_LEADING
+     * (12pt) below its own baseline, most of which is empty since Courier's descender is only
+     * ~0.157× the body size; the line below draws from its baseline *upward* by its cap-height
+     * (~0.562× the body size), eating into whatever follows. Without correcting for that split,
+     * equal raw before/after offsets produce a rule sitting visibly closer to the text below it
+     * than the text above — which is what a bold header's capitals grazing the rule looked like
+     * before this was gap-based.
+     */
+    public function addRule(array $color = [0.85, 0.85, 0.85], float $thickness = 0.75, float $gap = 4.0): void
     {
+        $descender = 0.157 * self::BODY_SIZE;
+        $capHeight = 0.562 * self::BODY_SIZE;
+        $spacingBefore = $gap - (self::BODY_LEADING - $descender);
+        $spacingAfter = $gap + $capHeight;
+
         $this->y -= $spacingBefore;
         if ($this->y - $thickness < self::MARGIN) {
             $this->startPage();
