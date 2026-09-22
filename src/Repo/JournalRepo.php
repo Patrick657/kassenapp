@@ -50,4 +50,24 @@ final class JournalRepo
             'nextBefore' => $hasMore ? (int) end($rows)['id'] : null,
         ];
     }
+
+    /**
+     * Every journal entry in chronological (oldest-first) ledger order, for the "Journal per
+     * E-Mail" PDF — page() is newest-first and capped at 200 for the on-screen infinite-scroll
+     * list, neither of which fits a printed Kassenbuch. Capped defensively at $limit so a very
+     * long-running install can't build an unbounded PDF in one request.
+     */
+    public function exportRows(int $limit = 5000): array
+    {
+        $sql = 'SELECT m.*, s.receipt_no FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id
+                ORDER BY m.id ASC LIMIT ' . max(1, $limit);
+        $rows = $this->db->query($sql)->fetchAll();
+        return array_map(static fn ($m) => [
+            'occurredAt' => Support::toIso($m['occurred_at']),
+            'type' => $m['type'],
+            'amountCents' => (int) $m['amount_cents'],
+            'note' => $m['note'],
+            'receiptNo' => $m['receipt_no'],
+        ], $rows);
+    }
 }

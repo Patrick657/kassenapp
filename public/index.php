@@ -19,7 +19,7 @@ if (str_starts_with($path, '/api/')) {
         // proceed; endpoints that don't touch the not-yet-migrated schema keep working normally.
         error_log('[Festkasse Migrator] ' . $e->getMessage());
     }
-    $api = new Api($db, (bool) $config['https']);
+    $api = new Api($db, (bool) $config['https'], $config['smtp']);
     $api->handle($_SERVER['REQUEST_METHOD'], $path);
     exit;
 }

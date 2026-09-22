@@ -284,6 +284,33 @@ must keep showing what was actually charged even if the option's price changes l
   Pfand reported as a separate line from real sales revenue later, `sales.deposit_cents` /
   `sale_items.deposit_cents` are already there to build that on top of.
 
+## Reports per email (Journal, Auswertungen, Z-Bericht)
+
+"Per E-Mail senden" on the Journal tab, the Auswertungen tab, and each individual Z-Bericht in
+Kasse → Abschlüsse sends that report as a PDF attachment to one or more addresses. No Composer, no
+vendor directory — same "zero dependencies, works via plain FTP deploy" model as the rest of the app:
+
+- **`src/Mailer.php`**: a minimal SMTP client written from scratch (raw socket, EHLO, optional
+  STARTTLS/implicit TLS, AUTH LOGIN, hand-built MIME multipart with attachments). Configured entirely
+  via `SMTP_*` in `.env` (see `.env.example`) — `SMTP_HOST` empty means email is off, and every send
+  attempt fails with a clear "kein Mailserver konfiguriert" error rather than silently doing nothing
+  or falling back to PHP's `mail()`. **Never edit the real `.env` from here** — only `.env.example`
+  documents the new keys; `Env::load()` only ever reads `.env`, never writes it, and the FTP deploy
+  workflow already excludes both `.env` and `.env.example` from ever reaching the live webspace.
+- **`src/Pdf.php`**: a minimal PDF writer written from scratch — no library, single monospace
+  (Courier) font, line-based layout with automatic pagination. Verified against `pypdf` during
+  development (multi-page splits, bold headings, German umlauts/€ round-tripping through the
+  WinAnsiEncoding/CP1252 conversion `Pdf::escapeText()` does) rather than assumed correct.
+- **Recipients**: Verwaltung → Einstellungen → "Berichts-E-Mail(s)" (`settings.report_email`,
+  comma-separated for more than one address) — not entered per send, matching how the codes/shop
+  name settings already work. Sending with none configured is refused with a clear error instead of
+  silently going nowhere.
+- **What's exported**: `POST /api/journal/email` — every `cash_movements` row (capped at 5000),
+  chronological. `POST /api/reports/email` — the same figures as the Übersicht/Auswertungen tabs
+  (KPIs, 7-day revenue, top articles, payment split, per-group revenue/profit) combined into one PDF.
+  `POST /api/z-reports/{no}/email` — one specific closed Z-Bericht. All three `requireAccess()`-gated
+  like the rest of Verwaltung, and logged to `audit_log`.
+
 ## Responsive layout (tablet portrait / iPad)
 
 The two-column POS view (tile grid + 430px cart) only works down to ~900px wide. Below that

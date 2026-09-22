@@ -32,8 +32,10 @@ final class Api
     private AuditRepo $audit;
     private MaintenanceRepo $maintenance;
     private UserRepo $users;
+    private Mailer $mailer;
 
-    public function __construct(private readonly PDO $db, bool $https)
+    /** @param array{host:string,port:int,encryption:string,user:string,pass:string,fromEmail:string,fromName:string} $smtp */
+    public function __construct(private readonly PDO $db, bool $https, array $smtp)
     {
         $this->auth = new Auth($db, $https);
         $this->settings = new SettingsRepo($db);
@@ -48,6 +50,7 @@ final class Api
         $this->audit = new AuditRepo($db);
         $this->maintenance = new MaintenanceRepo($db);
         $this->users = new UserRepo($db);
+        $this->mailer = Mailer::fromConfig($smtp);
     }
 
     public function handle(string $method, string $path): void
@@ -290,6 +293,11 @@ final class Api
             return $this->zReports->list();
         }
 
+        if ($method === 'POST' && preg_match('#^/api/z-reports/(\d+)/email$#', $path, $m)) {
+            $this->auth->requireAccess();
+            return $this->emailZReport((int) $m[1]);
+        }
+
         if ($method === 'GET' && $path === '/api/cash/status') {
             $this->auth->requireAccess();
             $sinceAt = $this->cash->lastCloseOccurredAt();
@@ -309,11 +317,21 @@ final class Api
             return $this->report($m[1]);
         }
 
+        if ($method === 'POST' && $path === '/api/reports/email') {
+            $this->auth->requireAccess();
+            return $this->emailReports();
+        }
+
         if ($method === 'GET' && $path === '/api/journal') {
             $this->auth->requireAccess();
             $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : 80;
             $before = isset($_GET['before']) ? (int) $_GET['before'] : null;
             return $this->journal->page($limit, $before);
+        }
+
+        if ($method === 'POST' && $path === '/api/journal/email') {
+            $this->auth->requireAccess();
+            return $this->emailJournal();
         }
 
         if ($method === 'PATCH' && $path === '/api/settings') {
@@ -745,6 +763,159 @@ final class Api
             'groups' => $this->reports->groups($this->settings->bool('track_stock', true)),
             default => throw new ApiException(404, 'Unbekannter Report'),
         };
+    }
+
+    /** @return string[] */
+    private function reportRecipientsOrFail(): array
+    {
+        $to = $this->settings->reportEmails();
+        if (empty($to)) {
+            throw new ApiException(400, 'Keine Berichts-E-Mail hinterlegt · Verwaltung → Einstellungen');
+        }
+        return $to;
+    }
+
+    private const JOURNAL_TAG_TEXT = [
+        'sale' => 'Verkauf', 'in' => 'Einlage', 'out' => 'Entnahme',
+        'close' => 'Z-Abschluss', 'delivery' => 'Warenzugang', 'deposit_return' => 'Pfand zurück',
+    ];
+
+    private function emailJournal(): array
+    {
+        $to = $this->reportRecipientsOrFail();
+        $rows = $this->journal->exportRows();
+        $shopName = $this->settings->forClient()['shopName'];
+
+        $pdf = new Pdf($shopName . ' · Journal');
+        $pdf->addLine('Erstellt ' . date('d.m.Y H:i') . ' Uhr · ' . count($rows) . ' Eintrag(e)');
+        $pdf->addSpacer();
+        $pdf->addLine(
+            Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Typ', 13)
+            . Support::padDisplay('Notiz', 42) . Support::padDisplayRight('Betrag', 11),
+            true
+        );
+        $pdf->addLine(str_repeat('-', 83));
+        foreach ($rows as $r) {
+            $when = (new \DateTime($r['occurredAt']))->format('d.m.Y H:i');
+            $type = self::JOURNAL_TAG_TEXT[$r['type']] ?? $r['type'];
+            $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
+            $pdf->addLine(
+                Support::padDisplay($when, 17) . Support::padDisplay($type, 13)
+                . Support::padDisplay($r['note'], 42) . Support::padDisplayRight($amount, 11)
+            );
+        }
+        if (empty($rows)) {
+            $pdf->addLine('Noch keine Kassenbewegungen.');
+        }
+
+        $filename = 'Journal-' . date('Y-m-d') . '.pdf';
+        $this->mailer->send(
+            $to,
+            $shopName . ' · Journal (' . date('d.m.Y') . ')',
+            'Anbei das Journal (Kassenbuch) mit ' . count($rows) . " Eintrag(en).\n\n" . $shopName,
+            [['filename' => $filename, 'mime' => 'application/pdf', 'content' => $pdf->output()]]
+        );
+        $this->audit->log('journal.email', 'Journal per E-Mail an ' . implode(', ', $to));
+        return ['ok' => true];
+    }
+
+    private function emailReports(): array
+    {
+        $to = $this->reportRecipientsOrFail();
+        $trackStock = $this->settings->bool('track_stock', true);
+        $shopName = $this->settings->forClient()['shopName'];
+        $kpis = $this->reports->kpis($trackStock);
+        $daily = $this->reports->daily();
+        $ranking = $this->reports->productsRanking(10);
+        $payments = $this->reports->payments();
+        $groups = $this->reports->groups($trackStock);
+
+        $pdf = new Pdf($shopName . ' · Auswertungen');
+        $pdf->addLine('Erstellt ' . date('d.m.Y H:i') . ' Uhr');
+        $pdf->addSpacer();
+
+        $pdf->addLine('Kennzahlen', true);
+        $pdf->addLine('Umsatz heute: ' . Support::eur($kpis['todayRevenueCents']) . ' (' . $kpis['todayCount'] . ' Bons)');
+        $pdf->addLine('Umsatz gesamt: ' . Support::eur($kpis['totalRevenueCents']) . ' (' . $kpis['totalCount'] . ' Bons)');
+        $pdf->addLine('Rohertrag gesamt: ' . Support::eur($kpis['grossProfitCents']));
+        $pdf->addLine('Ø Bon: ' . Support::eur($kpis['avgTicketCents']));
+        if ($trackStock && $kpis['lowStockCount'] > 0) {
+            $pdf->addLine('Artikel unter Meldebestand: ' . $kpis['lowStockCount'] . ' (' . implode(', ', $kpis['lowStockNames']) . ')');
+        }
+        $pdf->addSpacer();
+
+        $pdf->addLine('Umsatz pro Tag (letzte 7 Tage)', true);
+        foreach ($daily as $d) {
+            $pdf->addLine(Support::padDisplay($d['weekday'] . ' ' . $d['date'], 20) . Support::padDisplayRight(Support::eur($d['totalCents']), 12));
+        }
+        $pdf->addSpacer();
+
+        $pdf->addLine('Top Artikel nach Umsatz', true);
+        $pdf->addLine(Support::padDisplay('Artikel', 40) . Support::padDisplayRight('Menge', 10) . Support::padDisplayRight('Umsatz', 14));
+        foreach ($ranking as $r) {
+            $pdf->addLine(Support::padDisplay($r['name'] ?? '–', 40) . Support::padDisplayRight($r['qty'] . '×', 10) . Support::padDisplayRight(Support::eur($r['revenueCents']), 14));
+        }
+        if (empty($ranking)) {
+            $pdf->addLine('Noch keine Verkäufe.');
+        }
+        $pdf->addSpacer();
+
+        $pdf->addLine('Zahlungsarten', true);
+        $pdf->addLine('Bar: ' . Support::eur($payments['cash']['sumCents']) . ' (' . $payments['cash']['count'] . ' Bons)');
+        $pdf->addLine('Karte: ' . Support::eur($payments['card']['sumCents']) . ' (' . $payments['card']['count'] . ' Bons)');
+        $pdf->addSpacer();
+
+        $pdf->addLine('Artikelgruppen', true);
+        $pdf->addLine(Support::padDisplay('Gruppe', 30) . Support::padDisplayRight('Anteil', 9) . Support::padDisplayRight('Umsatz', 14) . Support::padDisplayRight('Rohertrag', 16));
+        foreach ($groups as $g) {
+            $pdf->addLine(
+                Support::padDisplay($g['name'], 30) . Support::padDisplayRight($g['sharePct'] . '%', 9)
+                . Support::padDisplayRight(Support::eur($g['revenueCents']), 14) . Support::padDisplayRight(Support::eur($g['profitCents']), 16)
+            );
+        }
+
+        $filename = 'Auswertungen-' . date('Y-m-d') . '.pdf';
+        $this->mailer->send(
+            $to,
+            $shopName . ' · Auswertungen (' . date('d.m.Y') . ')',
+            "Anbei die aktuellen Auswertungen.\n\n" . $shopName,
+            [['filename' => $filename, 'mime' => 'application/pdf', 'content' => $pdf->output()]]
+        );
+        $this->audit->log('reports.email', 'Auswertungen per E-Mail an ' . implode(', ', $to));
+        return ['ok' => true];
+    }
+
+    private function emailZReport(int $no): array
+    {
+        $to = $this->reportRecipientsOrFail();
+        $z = $this->zReports->find($no);
+        if ($z === null) {
+            throw new ApiException(404, 'Abschluss nicht gefunden');
+        }
+        $shopName = $this->settings->forClient()['shopName'];
+
+        $pdf = new Pdf($shopName . ' · Tagesabschluss Z-' . $z['no']);
+        $pdf->addLine('Abgeschlossen ' . (new \DateTime($z['closedAt']))->format('d.m.Y H:i') . ' Uhr');
+        if ($z['fromSaleAt'] !== null) {
+            $pdf->addLine('Zeitraum seit ' . (new \DateTime($z['fromSaleAt']))->format('d.m.Y H:i') . ' Uhr');
+        }
+        $pdf->addSpacer();
+        $pdf->addLine('Anzahl Bons: ' . $z['salesCount']);
+        $pdf->addLine('Bar: ' . Support::eur($z['cashCents']));
+        $pdf->addLine('Karte: ' . Support::eur($z['cardCents']));
+        $pdf->addLine('Gesamt: ' . Support::eur($z['totalCents']), true);
+        $pdf->addSpacer();
+        $pdf->addLine('Bar aus der Kasse entnommen: ' . Support::eur($z['drawerCents']));
+
+        $filename = 'Z-Bericht-' . $z['no'] . '.pdf';
+        $this->mailer->send(
+            $to,
+            $shopName . ' · Tagesabschluss Z-' . $z['no'],
+            'Anbei der Tagesabschluss Z-' . $z['no'] . ".\n\n" . $shopName,
+            [['filename' => $filename, 'mime' => 'application/pdf', 'content' => $pdf->output()]]
+        );
+        $this->audit->log('zreport.email', 'Z-' . $z['no'] . ' per E-Mail an ' . implode(', ', $to));
+        return ['ok' => true];
     }
 
     private function updateCodes(): array

@@ -26,6 +26,27 @@ final class ZReportRepo
         ], $rows);
     }
 
+    /** One specific closed Z-Bericht by its number, for "per E-Mail senden" on that report. */
+    public function find(int $no): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM z_reports WHERE no = ?');
+        $stmt->execute([$no]);
+        $r = $stmt->fetch();
+        if (!$r) {
+            return null;
+        }
+        return [
+            'no' => (int) $r['no'],
+            'closedAt' => Support::toIso($r['closed_at']),
+            'fromSaleAt' => $r['from_sale_at'] !== null ? Support::toIso($r['from_sale_at']) : null,
+            'salesCount' => (int) $r['sales_count'],
+            'cashCents' => (int) $r['cash_cents'],
+            'cardCents' => (int) $r['card_cents'],
+            'totalCents' => (int) $r['total_cents'],
+            'drawerCents' => (int) $r['drawer_cents'],
+        ];
+    }
+
     public function close(): array
     {
         $lastCloseAt = $this->cash->lastCloseOccurredAt();

@@ -8,7 +8,7 @@ use PDO;
 final class SettingsRepo
 {
     private const BOOL_KEYS = ['track_stock', 'warn_low', 'card_enabled', 'require_code'];
-    private const STRING_KEYS = ['shop_name'];
+    private const STRING_KEYS = ['shop_name', 'report_email'];
 
     public function __construct(private readonly PDO $db)
     {
@@ -35,6 +35,7 @@ final class SettingsRepo
             'warnLow' => ($raw['warn_low'] ?? '1') === '1',
             'cardEnabled' => ($raw['card_enabled'] ?? '1') === '1',
             'requireCode' => ($raw['require_code'] ?? '1') === '1',
+            'reportEmail' => $raw['report_email'] ?? '',
         ];
     }
 
@@ -56,6 +57,7 @@ final class SettingsRepo
             'warnLow' => 'warn_low',
             'cardEnabled' => 'card_enabled',
             'requireCode' => 'require_code',
+            'reportEmail' => 'report_email',
         ];
         $stmt = $this->db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
         foreach ($map as $clientKey => $dbKey) {
@@ -94,5 +96,12 @@ final class SettingsRepo
     {
         $stmt = $this->db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
         $stmt->execute(['recovery_email', $email ?? '']);
+    }
+
+    /** @return string[] one or more comma-separated report-email addresses, trimmed, never empty strings */
+    public function reportEmails(): array
+    {
+        $raw = $this->raw()['report_email'] ?? '';
+        return array_values(array_filter(array_map('trim', explode(',', $raw)), static fn (string $e): bool => $e !== ''));
     }
 }

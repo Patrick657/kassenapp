@@ -942,7 +942,11 @@ function renderUsersTab() {
 function renderAnalyticsTab() {
   const groups = state.admin.groups;
   if (!groups) return '<p>Lädt…</p>';
-  return groups.map((g) => `
+  const header = `<div class="table-head-row" style="padding:0 0 12px">
+    <div><div class="title">Auswertungen</div><div class="subtitle">Nach Artikelgruppe, seit Beginn</div></div>
+    <button data-action="email-reports" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Per E-Mail senden</button>
+  </div>`;
+  return header + (groups.map((g) => `
     <div class="group-card">
       <div class="group-head" data-action="show-group" data-name="${esc(g.name)}"><span class="name">${esc(g.name)}</span><span class="revenue mono">${eur(g.revenueCents)}</span></div>
       <div class="group-sub">${g.sharePct}% vom Gesamtumsatz · ${g.qty}× verkauft · ${g.count} Artikel</div>
@@ -958,7 +962,7 @@ function renderAnalyticsTab() {
         ${g.items.slice(0, 8).map((it) => `<div class="group-item-row" data-action="focus-article" data-id="${it.productId}"><span>${esc(it.name)}</span><span class="mono">${it.qty}× · ${eur(it.revenueCents)}</span></div>`).join('')}
       </div>
       <div class="group-show-all" data-action="show-group" data-name="${esc(g.name)}">Alle Artikel dieser Gruppe</div>
-    </div>`).join('') || '<p style="color:var(--text-3);font-size:13px">Noch keine Verkäufe.</p>';
+    </div>`).join('') || '<p style="color:var(--text-3);font-size:13px">Noch keine Verkäufe.</p>');
 }
 
 function renderArticlesTab() {
@@ -1048,7 +1052,9 @@ function renderJournalTab() {
     </div>`;
   }).join('');
   return `<div class="table-card journal-card">
-    <div class="table-head-row"><div><div class="title">Kassenbewegungen</div><div class="subtitle">Bon antippen für Belegansicht</div></div></div>
+    <div class="table-head-row"><div><div class="title">Kassenbewegungen</div><div class="subtitle">Bon antippen für Belegansicht</div></div>
+      <button data-action="email-journal" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Per E-Mail senden</button>
+    </div>
     ${rows}
     ${state.admin.journalBefore ? `<div style="padding:14px;text-align:center"><button data-action="load-more-journal" class="btn-neutral" style="padding:9px 16px;border-radius:9px;font-weight:700">Weitere laden</button></div>` : ''}
   </div>`;
@@ -1076,7 +1082,9 @@ function renderCashTab() {
       ${zReports.length === 0 ? '<div class="z-empty">Noch kein Tagesabschluss gebucht.</div>' : zReports.map((z) => `
         <div class="z-list-item">
           <div class="z-list-top"><span>Z-${z.no} · ${new Date(z.closedAt).toLocaleDateString('de-DE')}</span><span class="mono">${eur(z.totalCents)}</span></div>
-          <div class="z-list-detail">${z.salesCount} Bons · Bar ${eur(z.cashCents)} · Karte ${eur(z.cardCents)}</div>
+          <div class="z-list-detail">${z.salesCount} Bons · Bar ${eur(z.cashCents)} · Karte ${eur(z.cardCents)}
+            <button data-action="email-zreport" data-no="${z.no}" class="z-list-email-btn">Per E-Mail senden</button>
+          </div>
         </div>`).join('')}
     </div>
   </div>`;
@@ -1098,6 +1106,10 @@ function renderSettingsTab() {
       <div class="settings-row" style="cursor:default">
         <div><div class="title">Kassenname</div><div class="hint">Erscheint in Kopfzeile und auf dem Bon.</div></div>
         <input id="shop-name-input" class="settings-text-field" type="text" value="${esc(cfg.shopName)}">
+      </div>
+      <div class="settings-row" style="cursor:default">
+        <div><div class="title">Berichts-E-Mail(s)</div><div class="hint">Ziel für "Per E-Mail senden" bei Journal, Auswertungen und Z-Bericht · mehrere Adressen mit Komma trennen</div></div>
+        <input id="report-email-input" class="settings-text-field" type="text" placeholder="buchhaltung@example.com" value="${esc(cfg.reportEmail || '')}">
       </div>
       ${toggles.map((t) => `<div class="settings-row" data-action="toggle-setting" data-key="${t[0]}">
         <div><div class="title">${esc(t[1])}</div><div class="hint">${esc(t[2])}</div></div>
@@ -1159,6 +1171,15 @@ function renderAdmin() {
         state.settings.shopName = name;
         state.shopName = name;
         renderHeader();
+      } catch (e) { showToast(e.message); }
+    });
+    const reportEmailInput = document.getElementById('report-email-input');
+    reportEmailInput.addEventListener('change', async () => {
+      const value = reportEmailInput.value.trim();
+      try {
+        await guardedAdminCall(() => api('/settings', { method: 'PATCH', body: { reportEmail: value } }));
+        state.settings.reportEmail = value;
+        showToast('Berichts-E-Mail gespeichert');
       } catch (e) { showToast(e.message); }
     });
   }
@@ -1564,6 +1585,15 @@ function onAction(e) {
     }
     case 'open-receipt': return void api('/receipts/' + d.no).then((rc) => { state.receipt = rc; renderOverlay(); }).catch((e) => showToast(e.message));
     case 'load-more-journal': return void loadJournal(state.admin.journalBefore).then(renderMain);
+    case 'email-journal': return void guardedAdminCall(() => api('/journal/email', { method: 'POST' }))
+      .then((res) => { if (res) showToast('Journal per E-Mail gesendet'); })
+      .catch((e) => showToast(e.message));
+    case 'email-reports': return void guardedAdminCall(() => api('/reports/email', { method: 'POST' }))
+      .then((res) => { if (res) showToast('Auswertungen per E-Mail gesendet'); })
+      .catch((e) => showToast(e.message));
+    case 'email-zreport': return void guardedAdminCall(() => api('/z-reports/' + d.no + '/email', { method: 'POST' }))
+      .then((res) => { if (res) showToast('Z-' + d.no + ' per E-Mail gesendet'); })
+      .catch((e) => showToast(e.message));
     case 'open-cash-in': return openForm({ kind: 'in', amount: '', note: '' });
     case 'open-cash-out': return openForm({ kind: 'out', amount: '', note: '' });
     case 'add-deposit-return': return addDepositReturnToCart(Number(d.id));

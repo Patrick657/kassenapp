@@ -66,6 +66,29 @@ final class Support
         return $dt->format('c');
     }
 
+    /**
+     * Left-aligned column for the monospace (Courier) PDF reports — mb_-aware so a German umlaut
+     * (2 bytes in UTF-8, 1 glyph) still lines columns up; str_pad alone would miscount it.
+     * Truncates with an ellipsis rather than overflowing the column when too long.
+     */
+    public static function padDisplay(string $text, int $width): string
+    {
+        if (mb_strlen($text, 'UTF-8') > $width) {
+            $text = mb_substr($text, 0, max(0, $width - 1), 'UTF-8') . '…';
+        }
+        return $text . str_repeat(' ', max(0, $width - mb_strlen($text, 'UTF-8')));
+    }
+
+    /** Right-aligned counterpart of padDisplay(), for amount columns. */
+    public static function padDisplayRight(string $text, int $width): string
+    {
+        $len = mb_strlen($text, 'UTF-8');
+        if ($len >= $width) {
+            return mb_substr($text, 0, $width, 'UTF-8');
+        }
+        return str_repeat(' ', $width - $len) . $text;
+    }
+
     public static function receiptNo(int $sequentialId): string
     {
         return 'B-' . date('Y') . '-' . str_pad((string) $sequentialId, 6, '0', STR_PAD_LEFT);
