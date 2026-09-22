@@ -791,7 +791,7 @@ final class Api
         $pdf->addSpacer();
         $pdf->addLine(
             Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Typ', 13)
-            . Support::padDisplay('Notiz', 42) . Support::padDisplayRight('Betrag', 11),
+            . Support::padDisplay('Vorgang', 14) . Support::padDisplay('Notiz', 28) . Support::padDisplayRight('Betrag', 11),
             true
         );
         $pdf->addLine(str_repeat('-', 83));
@@ -801,8 +801,11 @@ final class Api
             $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
             $pdf->addLine(
                 Support::padDisplay($when, 17) . Support::padDisplay($type, 13)
-                . Support::padDisplay($r['note'], 42) . Support::padDisplayRight($amount, 11)
+                . Support::padDisplay($r['receiptNo'] ?? '–', 14) . Support::padDisplay($r['note'], 28) . Support::padDisplayRight($amount, 11)
             );
+            if (!empty($r['itemsSummary'])) {
+                $pdf->addLine('   → ' . $r['itemsSummary']);
+            }
         }
         if (empty($rows)) {
             $pdf->addLine('Noch keine Kassenbewegungen.');

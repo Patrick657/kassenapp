@@ -1047,7 +1047,11 @@ function renderJournalTab() {
     return `<div class="journal-row ${clickable ? 'clickable' : ''}" ${clickable ? `data-action="open-receipt" data-no="${esc(m.receiptNo)}"` : ''}>
       <span class="mono">${fmtDateTimeShort(m.occurredAt)}</span>
       <span class="journal-tag" style="${tagStyles[m.type] || ''}">${tagText[m.type] || m.type}</span>
-      <span>${esc(m.note)}</span>
+      <span class="mono journal-vorgang">${m.receiptNo ? esc(m.receiptNo) : '–'}</span>
+      <div>
+        <div>${esc(m.note)}</div>
+        ${m.itemsSummary ? `<div class="journal-items">${esc(m.itemsSummary)}</div>` : ''}
+      </div>
       <span class="journal-amount mono" style="color:${color}">${amount}</span>
     </div>`;
   }).join('');
@@ -1055,6 +1059,7 @@ function renderJournalTab() {
     <div class="table-head-row"><div><div class="title">Kassenbewegungen</div><div class="subtitle">Bon antippen für Belegansicht</div></div>
       <button data-action="email-journal" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Per E-Mail senden</button>
     </div>
+    <div class="journal-cols"><span>Datum</span><span>Typ</span><span>Vorgang</span><span>Notiz</span><span class="num">Betrag</span></div>
     ${rows}
     ${state.admin.journalBefore ? `<div style="padding:14px;text-align:center"><button data-action="load-more-journal" class="btn-neutral" style="padding:9px 16px;border-radius:9px;font-weight:700">Weitere laden</button></div>` : ''}
   </div>`;

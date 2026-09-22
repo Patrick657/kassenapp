@@ -34,6 +34,7 @@ final class JournalRepo
 
         $hasMore = count($rows) > $limit;
         $rows = array_slice($rows, 0, $limit);
+        $summaries = $this->itemSummariesFor($rows);
 
         $items = array_map(static fn ($m) => [
             'id' => (int) $m['id'],
@@ -43,6 +44,7 @@ final class JournalRepo
             'note' => $m['note'],
             'saleId' => $m['sale_id'] !== null ? (int) $m['sale_id'] : null,
             'receiptNo' => $m['receipt_no'],
+            'itemsSummary' => $m['sale_id'] !== null ? ($summaries[(int) $m['sale_id']] ?? null) : null,
         ], $rows);
 
         return [
@@ -62,12 +64,43 @@ final class JournalRepo
         $sql = 'SELECT m.*, s.receipt_no FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id
                 ORDER BY m.id ASC LIMIT ' . max(1, $limit);
         $rows = $this->db->query($sql)->fetchAll();
+        $summaries = $this->itemSummariesFor($rows);
+
         return array_map(static fn ($m) => [
             'occurredAt' => Support::toIso($m['occurred_at']),
             'type' => $m['type'],
             'amountCents' => (int) $m['amount_cents'],
             'note' => $m['note'],
             'receiptNo' => $m['receipt_no'],
+            'itemsSummary' => $m['sale_id'] !== null ? ($summaries[(int) $m['sale_id']] ?? null) : null,
         ], $rows);
+    }
+
+    /**
+     * One bulk query for every sale_id present in $rows (never one query per row) — a "Vorgang"
+     * (a sale and, if the customer also returned a Krug in the same checkout, its linked
+     * deposit_return row too) shares one sale_id, so both get the same itemized purchase list.
+     * @param array<int, array<string, mixed>> $rows raw cash_movements rows (with sale_id)
+     * @return array<int, string> sale_id => "2× Bier 0,5 l (8,00 €), 1× Bratwurst ... (3,50 €)"
+     */
+    private function itemSummariesFor(array $rows): array
+    {
+        $saleIds = array_values(array_unique(array_filter(
+            array_map(static fn ($r) => $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
+        )));
+        if (empty($saleIds)) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($saleIds), '?'));
+        $stmt = $this->db->prepare(
+            "SELECT sale_id, name, unit_cents, qty FROM sale_items WHERE sale_id IN ({$placeholders}) ORDER BY id ASC"
+        );
+        $stmt->execute($saleIds);
+        $bySale = [];
+        foreach ($stmt->fetchAll() as $item) {
+            $bySale[(int) $item['sale_id']][] = $item['qty'] . '× ' . $item['name']
+                . ' (' . Support::eur((int) $item['unit_cents'] * (int) $item['qty']) . ')';
+        }
+        return array_map(static fn (array $parts): string => implode(', ', $parts), $bySale);
     }
 }
