@@ -326,7 +326,9 @@ async function submitForm() {
         showToast('Gruppe angelegt');
       }
       closeForm();
-      await Promise.all([loadCategories(), loadAdminProducts()]);
+      // A rename cascades to every product's category text; keep the POS's own product list
+      // (from loadBootstrap(), not loadAdminProducts()) in sync too, not just the Verwaltung view.
+      await Promise.all([loadBootstrap(), loadCategories(), loadAdminProducts()]);
       renderHeader();
       renderMain();
       return;
@@ -1471,7 +1473,15 @@ function onAction(e) {
     case 'apply-deposit-type-now': {
       const depositTypeId = state.form.depositTypeId || null;
       return void guardedAdminCall(() => api('/categories/' + state.form.id + '/apply-deposit-type', { method: 'POST', body: { depositTypeId } }))
-        .then((res) => { if (!res) return; showToast(res.updated + ' Artikel aktualisiert'); return Promise.all([loadAdminProducts(), loadCategories()]); })
+        .then((res) => {
+          if (!res) return;
+          showToast(res.updated + ' Artikel aktualisiert');
+          // state.products (what the Kasse actually sells at) only comes from loadBootstrap() —
+          // loadAdminProducts()/loadCategories() alone left the POS showing stale Pfand until a
+          // manual reload, even though the Verwaltung's own Artikel list looked correct.
+          return Promise.all([loadBootstrap(), loadAdminProducts(), loadCategories()]);
+        })
+        .then(() => { renderHeader(); renderMain(); })
         .catch((e) => showToast(e.message));
     }
     case 'new-deposit-type': return openForm({ kind: 'deposit-type', name: '', amount: '' });
