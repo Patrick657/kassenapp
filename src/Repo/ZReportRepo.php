@@ -47,6 +47,29 @@ final class ZReportRepo
         ];
     }
 
+    /** Individual sales that make up one closed Z-Bericht, oldest first — for its PDF listing. */
+    public function salesFor(int $no): array
+    {
+        $stmt = $this->db->prepare('SELECT from_sale_at, closed_at FROM z_reports WHERE no = ?');
+        $stmt->execute([$no]);
+        $z = $stmt->fetch();
+        if (!$z) {
+            return [];
+        }
+        $sql = "SELECT receipt_no, sold_at, total_cents, payment FROM sales
+                WHERE voided_at IS NULL AND sold_at <= ?" . ($z['from_sale_at'] !== null ? ' AND sold_at > ?' : '')
+            . ' ORDER BY sold_at ASC';
+        $params = $z['from_sale_at'] !== null ? [$z['closed_at'], $z['from_sale_at']] : [$z['closed_at']];
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return array_map(static fn ($r) => [
+            'receiptNo' => $r['receipt_no'],
+            'soldAt' => Support::toIso($r['sold_at']),
+            'totalCents' => (int) $r['total_cents'],
+            'payment' => $r['payment'],
+        ], $stmt->fetchAll());
+    }
+
     public function close(): array
     {
         $lastCloseAt = $this->cash->lastCloseOccurredAt();

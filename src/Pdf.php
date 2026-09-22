@@ -7,8 +7,9 @@ namespace Festkasse;
  * Minimal dependency-free PDF writer — no Composer/vendor, single file, same "zero dependencies,
  * FTP deploy" model as the rest of the app (mirrors why the CSV export uses plain fputcsv instead
  * of a spreadsheet library). Line-based only: one monospace (Courier) line at a time, normal or
- * bold, auto-paginating onto additional A4 pages — enough for the ledger-style reports this app
- * emails (Journal, Auswertungen, Z-Bericht), not a general-purpose layout engine.
+ * bold, optionally coloured, plus filled rectangles for a coloured summary banner — auto-paginates
+ * onto additional A4 pages. Enough for the ledger-style reports this app emails (Journal,
+ * Auswertungen, Z-Bericht), not a general-purpose layout engine.
  */
 final class Pdf
 {
@@ -18,12 +19,17 @@ final class Pdf
     private const BODY_SIZE = 9.0;
     private const BODY_LEADING = 12.0;
 
+    public const GREEN = [0.10, 0.55, 0.25];
+    public const RED = [0.75, 0.15, 0.15];
+    public const WHITE = [1.0, 1.0, 1.0];
+    public const BLACK = [0.0, 0.0, 0.0];
+
     /** Roughly how many Courier characters fit one line at BODY_SIZE within the margins. */
     public const CHARS_PER_LINE = 92;
 
-    /** @var array<int, array<int, array{y: float, text: string, bold: bool, size: float}>> */
+    /** @var array<int, array<int, array<string, mixed>>> one array of draw-ops per page */
     private array $pages = [];
-    /** @var array<int, array{y: float, text: string, bold: bool, size: float}> */
+    /** @var array<int, array<string, mixed>> */
     private array $currentOps = [];
     private float $y;
 
@@ -43,13 +49,14 @@ final class Pdf
         $this->y = self::HEIGHT - self::MARGIN;
     }
 
-    public function addLine(string $text, bool $bold = false, float $size = self::BODY_SIZE): void
+    /** @param ?array{0:float,1:float,2:float} $color null = black */
+    public function addLine(string $text, bool $bold = false, float $size = self::BODY_SIZE, ?array $color = null): void
     {
         $leading = max(self::BODY_LEADING, $size + 3.0);
         if ($this->y - $leading < self::MARGIN) {
             $this->startPage();
         }
-        $this->currentOps[] = ['y' => $this->y, 'text' => $text, 'bold' => $bold, 'size' => $size];
+        $this->currentOps[] = ['type' => 'text', 'y' => $this->y, 'text' => $text, 'bold' => $bold, 'size' => $size, 'color' => $color ?? self::BLACK];
         $this->y -= $leading;
     }
 
@@ -64,6 +71,51 @@ final class Pdf
         foreach ($lines as $line) {
             $this->addLine($line, $bold, $size);
         }
+    }
+
+    /**
+     * A full-width coloured banner (e.g. a Z-Bericht's Endstand) — never split across a page
+     * break: if it wouldn't fit in the space left on the current page, a fresh page starts first.
+     * @param array<int, array{text: string, bold?: bool, size?: float}> $lines
+     * @param array{0: float, 1: float, 2: float} $bgColor
+     * @param array{0: float, 1: float, 2: float} $textColor
+     */
+    public function addBanner(array $lines, array $bgColor, array $textColor = self::WHITE): void
+    {
+        $padY = 10.0;
+        $padX = 14.0;
+        $leading = self::BODY_LEADING + 4.0;
+        $blockHeight = count($lines) * $leading;
+        $boxHeight = $blockHeight + 2 * $padY;
+
+        if ($this->y - $boxHeight < self::MARGIN) {
+            $this->startPage();
+        }
+
+        // Box top sits a little above the first line's baseline (room for the glyphs' ascenders).
+        $boxTop = $this->y + 8.0;
+        $boxBottom = $boxTop - $boxHeight;
+        $rectX = self::MARGIN - $padX;
+        $rectW = self::WIDTH - 2 * (self::MARGIN - $padX);
+        $this->currentOps[] = ['type' => 'rect', 'x' => $rectX, 'y' => $boxBottom, 'w' => $rectW, 'h' => $boxHeight, 'color' => $bgColor];
+
+        $this->y -= $padY - 2.0;
+        foreach ($lines as $l) {
+            $this->currentOps[] = [
+                'type' => 'text',
+                'y' => $this->y,
+                'text' => $l['text'],
+                'bold' => $l['bold'] ?? false,
+                'size' => $l['size'] ?? (self::BODY_SIZE + 1.0),
+                'color' => $textColor,
+            ];
+            $this->y -= $leading;
+        }
+        // Fixed clearance below the box's actual bottom edge (not a running subtraction from
+        // wherever the loop left off) — the next line's text still reaches a font-size-ish
+        // distance *above* its own baseline (ascenders), so "just past the edge" isn't enough
+        // room on its own; this must never end up between $boxBottom and $boxBottom minus that.
+        $this->y = $boxBottom - 12.0;
     }
 
     public function output(): string
@@ -99,9 +151,26 @@ final class Pdf
 
             $stream = '';
             foreach ($ops as $op) {
+                if ($op['type'] === 'rect') {
+                    $stream .= sprintf(
+                        "%.3F %.3F %.3F rg\n%.2F %.2F %.2F %.2F re f\n0 0 0 rg\n",
+                        $op['color'][0],
+                        $op['color'][1],
+                        $op['color'][2],
+                        $op['x'],
+                        $op['y'],
+                        $op['w'],
+                        $op['h']
+                    );
+                    continue;
+                }
                 $font = $op['bold'] ? 'F2' : 'F1';
+                $color = $op['color'];
                 $stream .= sprintf(
-                    "BT /%s %.1F Tf %.2F %.2F Td (%s) Tj ET\n",
+                    "%.3F %.3F %.3F rg\nBT /%s %.1F Tf %.2F %.2F Td (%s) Tj ET\n",
+                    $color[0],
+                    $color[1],
+                    $color[2],
                     $font,
                     $op['size'],
                     self::MARGIN,

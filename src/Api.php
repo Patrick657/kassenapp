@@ -786,9 +786,15 @@ final class Api
         $rows = $this->journal->exportRows();
         $shopName = $this->settings->forClient()['shopName'];
 
+        $balance = $this->cash->balanceCents();
         $pdf = new Pdf($shopName . ' · Journal');
-        $pdf->addLine('Erstellt ' . date('d.m.Y H:i') . ' Uhr · ' . count($rows) . ' Eintrag(e)');
-        $pdf->addSpacer();
+        $pdf->addBanner(
+            [
+                ['text' => 'Kassenbestand aktuell: ' . Support::eur($balance), 'bold' => true, 'size' => 13.0],
+                ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr · ' . count($rows) . ' Eintrag(e)'],
+            ],
+            [0.10, 0.15, 0.35]
+        );
         $pdf->addLine(
             Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Typ', 13)
             . Support::padDisplay('Vorgang', 14) . Support::padDisplay('Notiz', 28) . Support::padDisplayRight('Betrag', 11),
@@ -799,9 +805,11 @@ final class Api
             $when = (new \DateTime($r['occurredAt']))->format('d.m.Y H:i');
             $type = self::JOURNAL_TAG_TEXT[$r['type']] ?? $r['type'];
             $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
+            $color = $r['type'] === 'delivery' ? null : ($r['amountCents'] > 0 ? Pdf::GREEN : ($r['amountCents'] < 0 ? Pdf::RED : null));
             $pdf->addLine(
                 Support::padDisplay($when, 17) . Support::padDisplay($type, 13)
-                . Support::padDisplay($r['receiptNo'] ?? '–', 14) . Support::padDisplay($r['note'], 28) . Support::padDisplayRight($amount, 11)
+                . Support::padDisplay($r['receiptNo'] ?? '–', 14) . Support::padDisplay($r['note'], 28) . Support::padDisplayRight($amount, 11),
+                color: $color
             );
             if (!empty($r['itemsSummary'])) {
                 $pdf->addLine('   → ' . $r['itemsSummary']);
@@ -834,18 +842,18 @@ final class Api
         $groups = $this->reports->groups($trackStock);
 
         $pdf = new Pdf($shopName . ' · Auswertungen');
-        $pdf->addLine('Erstellt ' . date('d.m.Y H:i') . ' Uhr');
-        $pdf->addSpacer();
-
-        $pdf->addLine('Kennzahlen', true);
-        $pdf->addLine('Umsatz heute: ' . Support::eur($kpis['todayRevenueCents']) . ' (' . $kpis['todayCount'] . ' Bons)');
-        $pdf->addLine('Umsatz gesamt: ' . Support::eur($kpis['totalRevenueCents']) . ' (' . $kpis['totalCount'] . ' Bons)');
-        $pdf->addLine('Rohertrag gesamt: ' . Support::eur($kpis['grossProfitCents']));
-        $pdf->addLine('Ø Bon: ' . Support::eur($kpis['avgTicketCents']));
+        $pdf->addBanner(
+            [
+                ['text' => 'Umsatz gesamt: ' . Support::eur($kpis['totalRevenueCents']), 'bold' => true, 'size' => 13.0],
+                ['text' => 'Heute: ' . Support::eur($kpis['todayRevenueCents']) . ' (' . $kpis['todayCount'] . ' Bons) · Rohertrag: ' . Support::eur($kpis['grossProfitCents']) . ' · Ø Bon: ' . Support::eur($kpis['avgTicketCents'])],
+                ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr'],
+            ],
+            [0.10, 0.15, 0.35]
+        );
         if ($trackStock && $kpis['lowStockCount'] > 0) {
             $pdf->addLine('Artikel unter Meldebestand: ' . $kpis['lowStockCount'] . ' (' . implode(', ', $kpis['lowStockNames']) . ')');
+            $pdf->addSpacer();
         }
-        $pdf->addSpacer();
 
         $pdf->addLine('Umsatz pro Tag (letzte 7 Tage)', true);
         foreach ($daily as $d) {
@@ -897,18 +905,36 @@ final class Api
         }
         $shopName = $this->settings->forClient()['shopName'];
 
-        $pdf = new Pdf($shopName . ' · Tagesabschluss Z-' . $z['no']);
-        $pdf->addLine('Abgeschlossen ' . (new \DateTime($z['closedAt']))->format('d.m.Y H:i') . ' Uhr');
+        $period = 'Abgeschlossen ' . (new \DateTime($z['closedAt']))->format('d.m.Y H:i') . ' Uhr';
         if ($z['fromSaleAt'] !== null) {
-            $pdf->addLine('Zeitraum seit ' . (new \DateTime($z['fromSaleAt']))->format('d.m.Y H:i') . ' Uhr');
+            $period .= ' · seit ' . (new \DateTime($z['fromSaleAt']))->format('d.m.Y H:i') . ' Uhr';
         }
-        $pdf->addSpacer();
-        $pdf->addLine('Anzahl Bons: ' . $z['salesCount']);
-        $pdf->addLine('Bar: ' . Support::eur($z['cashCents']));
-        $pdf->addLine('Karte: ' . Support::eur($z['cardCents']));
-        $pdf->addLine('Gesamt: ' . Support::eur($z['totalCents']), true);
-        $pdf->addSpacer();
+        $pdf = new Pdf($shopName . ' · Tagesabschluss Z-' . $z['no']);
+        $pdf->addBanner(
+            [
+                ['text' => 'Endstand: ' . Support::eur($z['totalCents']), 'bold' => true, 'size' => 13.0],
+                ['text' => $period],
+                ['text' => 'Bar ' . Support::eur($z['cashCents']) . ' · Karte ' . Support::eur($z['cardCents']) . ' · ' . $z['salesCount'] . ' Bon(s)'],
+            ],
+            [0.10, 0.15, 0.35]
+        );
         $pdf->addLine('Bar aus der Kasse entnommen: ' . Support::eur($z['drawerCents']));
+        $pdf->addSpacer();
+
+        $sales = $this->zReports->salesFor($z['no']);
+        $pdf->addLine('Verkäufe', true);
+        $pdf->addLine(Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Zahlung', 10) . Support::padDisplayRight('Betrag', 11), true);
+        $pdf->addLine(str_repeat('-', 53));
+        foreach ($sales as $s) {
+            $pdf->addLine(
+                Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
+                . Support::padDisplay($s['payment'] === 'card' ? 'Karte' : 'Bar', 10) . Support::padDisplayRight(Support::eur($s['totalCents']), 11),
+                color: Pdf::GREEN
+            );
+        }
+        if (empty($sales)) {
+            $pdf->addLine('Keine Verkäufe in diesem Zeitraum.');
+        }
 
         $filename = 'Z-Bericht-' . $z['no'] . '.pdf';
         $this->mailer->send(
