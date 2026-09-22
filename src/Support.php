@@ -91,7 +91,7 @@ final class Support
 
     public static function receiptNo(int $sequentialId): string
     {
-        return 'B-' . date('Y') . '-' . str_pad((string) $sequentialId, 6, '0', STR_PAD_LEFT);
+        return str_pad((string) $sequentialId, 6, '0', STR_PAD_LEFT);
     }
 
     public static function clientIp(): ?string
