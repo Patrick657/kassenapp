@@ -57,37 +57,51 @@ final class JournalRepo
      * Every journal entry in chronological (oldest-first) ledger order, for the "Journal per
      * E-Mail" PDF — page() is newest-first and capped at 200 for the on-screen infinite-scroll
      * list, neither of which fits a printed Kassenbuch. Capped defensively at $limit so a very
-     * long-running install can't build an unbounded PDF in one request.
+     * long-running install can't build an unbounded PDF in one request. Unlike page(), this
+     * returns per-item 'lines' (not a single joined string) so the PDF can print one purchased
+     * article — or one returned Pfand-Option — per line instead of cramming them together.
      */
     public function exportRows(int $limit = 5000): array
     {
-        $sql = 'SELECT m.*, s.receipt_no FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id
+        $sql = 'SELECT m.*, s.receipt_no, dt.name AS deposit_type_name
+                FROM cash_movements m
+                LEFT JOIN sales s ON s.id = m.sale_id
+                LEFT JOIN deposit_types dt ON dt.id = m.deposit_type_id
                 ORDER BY m.id ASC LIMIT ' . max(1, $limit);
         $rows = $this->db->query($sql)->fetchAll();
-        $summaries = $this->itemSummariesFor($rows);
 
-        return array_map(static fn ($m) => [
-            'occurredAt' => Support::toIso($m['occurred_at']),
-            'type' => $m['type'],
-            'amountCents' => (int) $m['amount_cents'],
-            'note' => $m['note'],
-            'receiptNo' => $m['receipt_no'],
-            'itemsSummary' => $m['sale_id'] !== null ? ($summaries[(int) $m['sale_id']] ?? null) : null,
-        ], $rows);
+        $saleIds = array_values(array_unique(array_filter(
+            array_map(static fn ($r) => $r['type'] === 'sale' && $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
+        )));
+        $itemLines = $this->itemLinesForSales($saleIds);
+
+        return array_map(static function ($m) use ($itemLines) {
+            $lines = match ($m['type']) {
+                'sale' => $itemLines[(int) $m['sale_id']] ?? [],
+                'deposit_return' => [[
+                    'label' => $m['qty'] . '× ' . ($m['deposit_type_name'] ?? 'Pfand'),
+                    'amountCents' => (int) $m['amount_cents'],
+                ]],
+                default => [],
+            };
+            return [
+                'occurredAt' => Support::toIso($m['occurred_at']),
+                'type' => $m['type'],
+                'amountCents' => (int) $m['amount_cents'],
+                'note' => $m['note'],
+                'receiptNo' => $m['receipt_no'],
+                'lines' => $lines,
+            ];
+        }, $rows);
     }
 
     /**
-     * One bulk query for every sale_id present in $rows (never one query per row) — a "Vorgang"
-     * (a sale and, if the customer also returned a Krug in the same checkout, its linked
-     * deposit_return row too) shares one sale_id, so both get the same itemized purchase list.
-     * @param array<int, array<string, mixed>> $rows raw cash_movements rows (with sale_id)
-     * @return array<int, string> sale_id => "2× Bier 0,5 l (8,00 €), 1× Bratwurst ... (3,50 €)"
+     * One bulk query for every given sale_id (never one query per row).
+     * @param int[] $saleIds
+     * @return array<int, array<int, array{label: string, amountCents: int}>>
      */
-    private function itemSummariesFor(array $rows): array
+    private function itemLinesForSales(array $saleIds): array
     {
-        $saleIds = array_values(array_unique(array_filter(
-            array_map(static fn ($r) => $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
-        )));
         if (empty($saleIds)) {
             return [];
         }
@@ -98,9 +112,33 @@ final class JournalRepo
         $stmt->execute($saleIds);
         $bySale = [];
         foreach ($stmt->fetchAll() as $item) {
-            $bySale[(int) $item['sale_id']][] = $item['qty'] . '× ' . $item['name']
-                . ' (' . Support::eur((int) $item['unit_cents'] * (int) $item['qty']) . ')';
+            $bySale[(int) $item['sale_id']][] = [
+                'label' => $item['qty'] . '× ' . $item['name'],
+                'amountCents' => (int) $item['unit_cents'] * (int) $item['qty'],
+            ];
         }
-        return array_map(static fn (array $parts): string => implode(', ', $parts), $bySale);
+        return $bySale;
+    }
+
+    /**
+     * A "Vorgang" (a sale and, if the customer also returned a Krug in the same checkout, its
+     * linked deposit_return row too) shares one sale_id, so both get the same itemized purchase
+     * list — the joined-string form page()'s on-screen infinite-scroll list displays inline.
+     * @param array<int, array<string, mixed>> $rows raw cash_movements rows (with sale_id)
+     * @return array<int, string> sale_id => "2× Bier 0,5 l (8,00 €), 1× Bratwurst ... (3,50 €)"
+     */
+    private function itemSummariesFor(array $rows): array
+    {
+        $saleIds = array_values(array_unique(array_filter(
+            array_map(static fn ($r) => $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
+        )));
+        $bySale = $this->itemLinesForSales($saleIds);
+        return array_map(
+            static fn (array $lines): string => implode(', ', array_map(
+                static fn (array $l) => $l['label'] . ' (' . Support::eur($l['amountCents']) . ')',
+                $lines
+            )),
+            $bySale
+        );
     }
 }

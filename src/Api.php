@@ -795,28 +795,28 @@ final class Api
             ],
             [0.10, 0.15, 0.35]
         );
-        $pdf->addLine(
-            Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Typ', 13)
-            . Support::padDisplay('Vorgang', 14) . Support::padDisplay('Notiz', 28) . Support::padDisplayRight('Betrag', 11),
-            true
-        );
-        $pdf->addLine(str_repeat('-', 83));
+        // One card per Vorgang, using the full line width: a bold, coloured header (Nr. · Typ ·
+        // Datum/Zeit, amount right-aligned) followed by one line per purchased article or
+        // returned Pfand-Option — never a single run-on summary that could overflow the margin.
         foreach ($rows as $r) {
             $when = (new \DateTime($r['occurredAt']))->format('d.m.Y H:i');
             $type = self::JOURNAL_TAG_TEXT[$r['type']] ?? $r['type'];
             $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
             $color = $r['type'] === 'delivery' ? null : ($r['amountCents'] > 0 ? Pdf::GREEN : ($r['amountCents'] < 0 ? Pdf::RED : null));
-            $pdf->addLine(
-                Support::padDisplay($when, 17) . Support::padDisplay($type, 13)
-                . Support::padDisplay($r['receiptNo'] ?? '–', 14) . Support::padDisplay($r['note'], 28) . Support::padDisplayRight($amount, 11),
-                color: $color
-            );
-            if (!empty($r['itemsSummary'])) {
-                foreach (Support::wrap($r['itemsSummary'], Pdf::CHARS_PER_LINE - 5) as $i => $line) {
-                    $pdf->addLine(($i === 0 ? '   → ' : '     ') . $line, color: Pdf::GRAY);
+
+            $header = 'Nr. ' . ($r['receiptNo'] ?? '–') . '  ·  ' . $type . '  ·  ' . $when . ' Uhr';
+            $pdf->addLine(Support::padDisplay($header, 80) . Support::padDisplayRight($amount, 12), true, color: $color);
+
+            if (!empty($r['lines'])) {
+                foreach ($r['lines'] as $line) {
+                    $pdf->addLine(
+                        '  ' . Support::padDisplay($line['label'], 78) . Support::padDisplayRight(Support::eur($line['amountCents']), 12)
+                    );
                 }
+            } elseif ($r['note'] !== '') {
+                $pdf->addLine('  ' . $r['note'], color: Pdf::GRAY);
             }
-            $pdf->addSpacer(3.0);
+            $pdf->addSpacer(5.0);
         }
         if (empty($rows)) {
             $pdf->addLine('Noch keine Kassenbewegungen.');

@@ -89,42 +89,6 @@ final class Support
         return str_repeat(' ', $width - $len) . $text;
     }
 
-    /**
-     * mb_-aware word-wrap for the monospace PDF reports — breaks on spaces, never mid-word unless
-     * a single word alone exceeds the width. Used so long item-summary lines (many products in one
-     * sale) don't run past the page margin instead of wrapping cleanly onto a continuation line.
-     * @return string[] at least one line, even for an empty/short input
-     */
-    public static function wrap(string $text, int $width): array
-    {
-        $lines = [];
-        $current = '';
-        foreach (preg_split('/\s+/u', trim($text)) ?: [] as $word) {
-            if ($word === '') {
-                continue;
-            }
-            while (mb_strlen($word, 'UTF-8') > $width) {
-                if ($current !== '') {
-                    $lines[] = $current;
-                    $current = '';
-                }
-                $lines[] = mb_substr($word, 0, $width, 'UTF-8');
-                $word = mb_substr($word, $width, null, 'UTF-8');
-            }
-            $candidate = $current === '' ? $word : $current . ' ' . $word;
-            if (mb_strlen($candidate, 'UTF-8') > $width && $current !== '') {
-                $lines[] = $current;
-                $current = $word;
-            } else {
-                $current = $candidate;
-            }
-        }
-        if ($current !== '') {
-            $lines[] = $current;
-        }
-        return $lines !== [] ? $lines : [''];
-    }
-
     public static function receiptNo(int $sequentialId): string
     {
         return str_pad((string) $sequentialId, 6, '0', STR_PAD_LEFT);
