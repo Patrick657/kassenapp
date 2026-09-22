@@ -320,9 +320,6 @@ async function submitForm() {
       const depositTypeId = f.depositTypeId || null;
       if (f.id) {
         await guardedAdminCall(() => api('/categories/' + f.id, { method: 'PATCH', body: { name, depositTypeId } }));
-        if (f.applyExisting) {
-          await guardedAdminCall(() => api('/categories/' + f.id + '/apply-deposit-type', { method: 'POST', body: { depositTypeId } }));
-        }
         showToast('Gruppe gespeichert');
       } else {
         await guardedAdminCall(() => api('/categories', { method: 'POST', body: { name, trackStockDefault: !!f.trackStockDefault, depositTypeId } }));
@@ -588,6 +585,12 @@ async function posPinPress(k) {
 async function posSwitchUser() {
   try { await api('/pos/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
   state.posUser = null;
+  // "Wechseln" is reachable from the header on every screen, including Verwaltung — without
+  // forcing the view back to Kasse, renderMain() would just re-render whatever admin tab was
+  // open instead of showing the Mitarbeiter-Auswahl (renderPos() only shows it when state.view
+  // is already 'pos').
+  state.view = 'pos';
+  state.adminTab = 'overview';
   await loadBootstrap();
   renderHeader();
   renderMain();
@@ -1260,12 +1263,9 @@ function renderFormOverlay() {
     const depositOptions = '<option value="">Kein Pfand</option>' + depositTypes.map((t) => `<option value="${t.id}" ${f.depositTypeId === t.id ? 'selected' : ''}>${esc(t.name)} · ${eur(t.amountCents)}</option>`).join('');
     fields += `<div class="form-field"><label>Pfand-Standard für neue Artikel</label><select data-form-key="depositTypeId">${depositOptions}</select></div>`;
     if (f.id) {
-      fields += `<div class="settings-row" data-action="toggle-form-applyexisting" style="padding:12px 0;cursor:pointer">
-        <div><div class="title" style="font-size:13px;font-weight:600">Auch auf die ${f.productCount || 0} bestehenden Artikel dieser Gruppe anwenden</div><div class="hint" style="font-size:11px;color:var(--text-3)">Überschreibt das Pfand jedes Artikels in dieser Gruppe sofort</div></div>
-        <div class="switch-track ${f.applyExisting ? 'on' : ''}"><div class="switch-knob"></div></div>
-      </div>`;
+      fields += `<button type="button" data-action="apply-deposit-type-now" class="btn-neutral" style="width:100%;padding:11px;border-radius:10px;font-size:13px;font-weight:700;margin-top:-4px">Jetzt auf alle ${f.productCount || 0} bestehenden Artikel dieser Gruppe anwenden</button>`;
     }
-    hint = depositTypes.length ? 'Neue Artikel dieser Gruppe übernehmen diese Auswahl automatisch, bleibt pro Artikel änderbar.' : 'Lege zuerst unter "Pfand" mindestens eine Option an, um sie hier zuzuweisen.';
+    hint = depositTypes.length ? 'Neue Artikel dieser Gruppe übernehmen diese Auswahl automatisch, bleibt pro Artikel änderbar. Bestehende Artikel bleiben unangetastet, bis du den Button oben nutzt.' : 'Lege zuerst unter "Pfand" mindestens eine Option an, um sie hier zuzuweisen.';
     submitLabel = f.id ? 'Speichern' : 'Anlegen';
   } else if (f.kind === 'deposit-type') {
     title = f.id ? 'Pfand-Option bearbeiten' : 'Neue Pfand-Option';
@@ -1447,7 +1447,7 @@ function onAction(e) {
     case 'new-category': return openForm({ kind: 'category', name: '', trackStockDefault: true, depositTypeId: null });
     case 'rename-category': {
       const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
-      return openForm({ kind: 'category', id: c.id, name: c.name, depositTypeId: c.depositTypeId, productCount: c.productCount, applyExisting: false });
+      return openForm({ kind: 'category', id: c.id, name: c.name, depositTypeId: c.depositTypeId, productCount: c.productCount });
     }
     case 'toggle-category-default': {
       const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
@@ -1468,7 +1468,12 @@ function onAction(e) {
       },
     });
     case 'toggle-form-trackstockdefault': state.form.trackStockDefault = !state.form.trackStockDefault; return renderOverlay();
-    case 'toggle-form-applyexisting': state.form.applyExisting = !state.form.applyExisting; return renderOverlay();
+    case 'apply-deposit-type-now': {
+      const depositTypeId = state.form.depositTypeId || null;
+      return void guardedAdminCall(() => api('/categories/' + state.form.id + '/apply-deposit-type', { method: 'POST', body: { depositTypeId } }))
+        .then((res) => { if (!res) return; showToast(res.updated + ' Artikel aktualisiert'); return Promise.all([loadAdminProducts(), loadCategories()]); })
+        .catch((e) => showToast(e.message));
+    }
     case 'new-deposit-type': return openForm({ kind: 'deposit-type', name: '', amount: '' });
     case 'edit-deposit-type': {
       const t = (state.admin.depositTypes || []).find((x) => x.id === Number(d.id));
