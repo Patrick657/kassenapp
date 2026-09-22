@@ -23,6 +23,7 @@ final class Pdf
     public const RED = [0.75, 0.15, 0.15];
     public const WHITE = [1.0, 1.0, 1.0];
     public const BLACK = [0.0, 0.0, 0.0];
+    public const GRAY = [0.45, 0.45, 0.45];
 
     /** Roughly how many Courier characters fit one line at BODY_SIZE within the margins. */
     public const CHARS_PER_LINE = 92;

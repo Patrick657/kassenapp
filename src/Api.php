@@ -812,8 +812,11 @@ final class Api
                 color: $color
             );
             if (!empty($r['itemsSummary'])) {
-                $pdf->addLine('   → ' . $r['itemsSummary']);
+                foreach (Support::wrap($r['itemsSummary'], Pdf::CHARS_PER_LINE - 5) as $i => $line) {
+                    $pdf->addLine(($i === 0 ? '   → ' : '     ') . $line, color: Pdf::GRAY);
+                }
             }
+            $pdf->addSpacer(3.0);
         }
         if (empty($rows)) {
             $pdf->addLine('Noch keine Kassenbewegungen.');
