@@ -201,7 +201,7 @@ optional field in the article form.
 - **`GET /api/products/export`** (protected) streams a semicolon-delimited CSV of all active
   articles — UTF-8 BOM so Excel picks the encoding up correctly, German decimal commas for prices,
   `ja`/`nein` for stock tracking. Columns: `Artikelnummer;Name;Gruppe;Verkaufspreis;Einkaufspreis;
-  Lagerbestand_fuehren;Bestand;Meldebestand`.
+  Lagerbestand_fuehren;Bestand;Meldebestand;Pfand`.
 - **`POST /api/products/import`** (protected) takes that same CSV back as the raw request body
   (not multipart — the frontend reads the file client-side and POSTs its text). Matches existing
   articles by Artikelnummer first, then by exact name, otherwise creates a new one; unknown groups
@@ -211,6 +211,78 @@ optional field in the article form.
 - Chose plain CSV over a real `.xlsx` library deliberately: this deploys via FTP with no build
   step and sometimes no SSH at all, and PHP's `fputcsv`/`str_getcsv` need zero dependencies. Excel
   opens/edits/saves the file natively either way.
+
+## Pfand (Mehrwegpfand auf Artikel, z. B. Krüge)
+
+Pfand-Optionen (Verwaltung → **Pfand**, e.g. "Krug 3,00 €", "Pfandflasche 0,15 €") are their own
+managed entity (`deposit_types` table, migration v8) instead of a raw amount typed separately onto
+every article — one place to rename or reprice a deposit, which then applies everywhere it's
+referenced. Both `categories` and `products` carry a nullable `deposit_type_id` FK; the effective
+deposit amount is always resolved live via `LEFT JOIN deposit_types` (`ProductRepo::find()`/
+`listActive()`), never stored redundantly — repricing an option (Verwaltung → Pfand → edit) updates
+every article using it immediately, with no per-article migration needed. `sale_items.deposit_cents`
+/ `sales.deposit_cents` are the one place a raw amount is still frozen, deliberately: a past receipt
+must keep showing what was actually charged even if the option's price changes later, same as
+`cost_cents` always has.
+
+- **Verwaltung → Pfand**: CRUD for Pfand-Optionen (`DepositTypeRepo`) — name + amount. Deleting one
+  is blocked while any category or article still references it (`DELETE /api/deposit-types/{id}`).
+- **Assigning — two ways, per the operator's own workflow**:
+  - **Per Artikelgruppe**: the group's own `depositTypeId` (Artikelgruppen-Formular, "Pfand-Standard
+    für neue Artikel") only prefills *new* articles created in that group going forward — it does
+    **not** retroactively touch existing ones. A separate checkbox in the same form, "Auch auf die
+    N bestehenden Artikel dieser Gruppe anwenden", triggers `POST /api/categories/{id}/apply-
+    deposit-type` (`CategoryRepo::applyDepositTypeToProducts()`) — a one-time bulk stamp of every
+    current non-archived article in that group. Deliberately a separate, explicit action from the
+    group default, so editing "what new articles get" never silently overwrites what's already
+    configured.
+  - **Per Artikel**: a `<select>` in the article form lets any article pick its own Pfand-Option (or
+    "Kein Pfand"), independent of its group's default — always wins over the group setting.
+- **Charging**: the POS tile shows a small "+ Pfand X €" hint, and the cart line shows the deposit
+  amount separately from the goods price. `SaleRepo::create()` resolves the deposit from the
+  product row server-side (same trust model as `cost_cents` — never taken from the client), adds
+  `qty × deposit_cents` on top of the total **after** discounting (Pfand is never discountable —
+  it's a refundable liability, not part of the goods price), and freezes it per line into
+  `sale_items.deposit_cents` and per sale into `sales.deposit_cents` so receipts and the journal
+  can show it distinctly ("zzgl. Pfand …"). It's included in `sales.total_cents`, so the existing
+  cash-movement/Kassenbestand logic picks it up automatically with no separate bookkeeping.
+- **Returning — part of the normal cart, one combined booking, keyed by Pfand-Option**: one big
+  return tile per Pfand-Option ("↩ Krug · −3,00 €") sits above the POS tile grid — not per article,
+  since the register doesn't need to know which drink a returned Krug held, only how much deposit
+  to pay back (`state.depositTypes`, sent by `/api/bootstrap` alongside `products`, public like
+  everything else the POS needs). Tapping it adds a line to the *current* cart (qty 1, +1 per
+  further tap, same `line-inc`/`line-dec`/`line-del` controls as any other line) with a negative
+  `depositCents` — nothing is booked yet. A customer returning Krüge while ordering something new
+  therefore sees one net amount for the whole visit, not two separate transactions: e.g. 2 new Bier
+  (8,00 € + 6,00 € neues Pfand) plus 2 returned Krüge (−6,00 €) nets to 8,00 € to collect. If the
+  returned Pfand exceeds the new order, the net goes negative — the cart shows "Auszahlung an Kunde"
+  and the checkout button reads "Auszahlen · X €"; no payment method or tender pad is shown in that
+  case, since there's nothing to collect (payment is implicitly cash — a card can't receive a
+  negative charge, and Pfand is always refunded in cash). A return-only cart (no new items at all)
+  works the same way, net always ≤ 0.
+  `SaleRepo::create()` books it all as one transaction: the sale row (if any items) always uses the
+  full gross total for its own bookkeeping/Umsatz correctness, while a same-checkout *cash* payment
+  is validated/recorded against the **net** amount (gross minus returned Pfand) — a card payment is
+  never netted this way and still charges the full gross total, since a card charge and a cash
+  refund are two different tenders that can't offset each other; the Pfand payout happens as its
+  own negative `cash_movements` row either way. Each return line resolves the Pfand-Option itself
+  server-side (never trusted from the client, no category-scope check — an option isn't tied to a
+  cashier's article groups), and the whole checkout rolls back atomically if any line fails (e.g.
+  trying to pay out more Pfand than is currently in the drawer). `cash_movements.deposit_type_id`
+  (migration v10, replacing the article-keyed `product_id` a return used to carry) plus `sale_id`
+  let the Journal and printed receipt show which option was returned and link back to the same Bon
+  a `sale` entry would open — but a returned Krug no longer restocks anything, since there's no
+  longer a specific article on the other end of a return to restock.
+- **CSV import/export unaffected**: the `Pfand` column still round-trips as a plain amount (not a
+  Pfand-Option name) — simplest for editing in Excel. On import, `DepositTypeRepo::
+  findOrCreateByAmount()` reuses an existing option with that exact amount or creates a generically
+  named one, then links the article to it; on export, the resolved `deposit_cents` is printed as
+  before.
+- **Umsatz-Reports unverändert**: `ReportsRepo`'s Umsatz/Auswertungen figures and the Z-Bon's
+  Bar/Karte totals intentionally keep using the full `total_cents` (goods + Pfand), matching what
+  actually moves through the drawer — Pfand isn't subtracted out of "Umsatz" anywhere. If you want
+  Pfand reported as a separate line from real sales revenue later, `sales.deposit_cents` /
+  `sale_items.deposit_cents` are already there to build that on top of.
 
 ## Responsive layout (tablet portrait / iPad)
 

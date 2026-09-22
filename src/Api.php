@@ -6,6 +6,7 @@ namespace Festkasse;
 use Festkasse\Repo\AuditRepo;
 use Festkasse\Repo\CashRepo;
 use Festkasse\Repo\CategoryRepo;
+use Festkasse\Repo\DepositTypeRepo;
 use Festkasse\Repo\JournalRepo;
 use Festkasse\Repo\MaintenanceRepo;
 use Festkasse\Repo\ProductRepo;
@@ -22,6 +23,7 @@ final class Api
     private SettingsRepo $settings;
     private ProductRepo $products;
     private CategoryRepo $categories;
+    private DepositTypeRepo $depositTypes;
     private CashRepo $cash;
     private SaleRepo $sales;
     private ZReportRepo $zReports;
@@ -37,6 +39,7 @@ final class Api
         $this->settings = new SettingsRepo($db);
         $this->products = new ProductRepo($db);
         $this->categories = new CategoryRepo($db);
+        $this->depositTypes = new DepositTypeRepo($db);
         $this->cash = new CashRepo($db);
         $this->sales = new SaleRepo($db, $this->products, $this->cash);
         $this->zReports = new ZReportRepo($db, $this->cash);
@@ -183,7 +186,11 @@ final class Api
             if ($method === 'POST') {
                 $this->auth->requireAccess();
                 $b = Support::jsonBody();
-                $id = $this->categories->create((string) ($b['name'] ?? ''), (bool) ($b['trackStockDefault'] ?? true));
+                $id = $this->categories->create(
+                    (string) ($b['name'] ?? ''),
+                    (bool) ($b['trackStockDefault'] ?? true),
+                    self::normalizeDepositTypeId($b['depositTypeId'] ?? null)
+                );
                 return ['id' => $id];
             }
         }
@@ -199,11 +206,49 @@ final class Api
                 if (array_key_exists('trackStockDefault', $b)) {
                     $this->categories->setTrackStockDefault($id, (bool) $b['trackStockDefault']);
                 }
+                if (array_key_exists('depositTypeId', $b)) {
+                    $this->categories->setDepositType($id, self::normalizeDepositTypeId($b['depositTypeId']));
+                }
                 return ['ok' => true];
             }
             if ($method === 'DELETE') {
                 $this->auth->requireAccess();
                 $this->categories->delete($id);
+                return ['ok' => true];
+            }
+        }
+
+        // Bulk-apply a Pfand-Option to every article currently in this group — distinct from the
+        // group's own depositTypeId above, which only prefills *new* articles going forward.
+        if ($method === 'POST' && preg_match('#^/api/categories/(\d+)/apply-deposit-type$#', $path, $m)) {
+            $this->auth->requireAccess();
+            $b = Support::jsonBody();
+            $count = $this->categories->applyDepositTypeToProducts((int) $m[1], self::normalizeDepositTypeId($b['depositTypeId'] ?? null));
+            return ['updated' => $count];
+        }
+
+        if ($path === '/api/deposit-types') {
+            $this->auth->requireAccess();
+            if ($method === 'GET') {
+                return $this->depositTypes->list();
+            }
+            if ($method === 'POST') {
+                $b = Support::jsonBody();
+                $id = $this->depositTypes->create((string) ($b['name'] ?? ''), Support::parseAmountToCents((string) ($b['amount'] ?? '0')));
+                return ['id' => $id];
+            }
+        }
+
+        if (preg_match('#^/api/deposit-types/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            $this->auth->requireAccess();
+            if ($method === 'PATCH') {
+                $b = Support::jsonBody();
+                $this->depositTypes->update($id, (string) ($b['name'] ?? ''), Support::parseAmountToCents((string) ($b['amount'] ?? '0')));
+                return ['ok' => true];
+            }
+            if ($method === 'DELETE') {
+                $this->depositTypes->delete($id);
                 return ['ok' => true];
             }
         }
@@ -313,6 +358,7 @@ final class Api
             'name' => $p['name'],
             'category' => $p['category'],
             'priceCents' => (int) $p['price_cents'],
+            'depositCents' => (int) $p['deposit_cents'],
             'stock' => (int) $p['stock'],
             'stockMin' => (int) $p['stock_min'],
             'trackStock' => (bool) $p['track_stock'],
@@ -326,6 +372,7 @@ final class Api
             'shopName' => $settings['shopName'],
             'settings' => $settings,
             'products' => $products,
+            'depositTypes' => $this->depositTypes->list(),
             'cashBalanceCents' => $this->cash->balanceCents(),
             'todayRevenueCents' => $today,
             'access' => $this->auth->status(),
@@ -361,6 +408,8 @@ final class Api
             'sku' => $p['sku'] ?? null,
             'category' => $p['category'],
             'priceCents' => (int) $p['price_cents'],
+            'depositCents' => (int) $p['deposit_cents'],
+            'depositTypeId' => $p['deposit_type_id'] !== null ? (int) $p['deposit_type_id'] : null,
             'costCents' => (int) $p['cost_cents'],
             'stock' => (int) $p['stock'],
             'stockMin' => (int) $p['stock_min'],
@@ -370,7 +419,9 @@ final class Api
         ], $this->products->listActive());
     }
 
-    private const CSV_HEADER = ['Artikelnummer', 'Name', 'Gruppe', 'Verkaufspreis', 'Einkaufspreis', 'Lagerbestand_fuehren', 'Bestand', 'Meldebestand'];
+    // Pfand is appended at the end, not inserted among the existing columns, so a CSV exported
+    // before this field existed still imports correctly (missing trailing column = 0 Pfand).
+    private const CSV_HEADER = ['Artikelnummer', 'Name', 'Gruppe', 'Verkaufspreis', 'Einkaufspreis', 'Lagerbestand_fuehren', 'Bestand', 'Meldebestand', 'Pfand'];
 
     private function exportProductsCsv(): never
     {
@@ -389,6 +440,7 @@ final class Api
                 ((bool) $p['track_stock']) ? 'ja' : 'nein',
                 (string) (int) $p['stock'],
                 (string) (int) $p['stock_min'],
+                number_format(((int) $p['deposit_cents']) / 100, 2, ',', ''),
             ], ';');
         }
         fclose($out);
@@ -429,8 +481,8 @@ final class Api
 
         foreach ($lines as $i => $line) {
             $rowNum = $i + 2; // header is row 1
-            $cols = array_pad(str_getcsv($line, $delimiter), 8, '');
-            [$sku, $name, $groupName, $priceRaw, $costRaw, $trackRaw, $stockRaw, $stockMinRaw] = $cols;
+            $cols = array_pad(str_getcsv($line, $delimiter), 9, '');
+            [$sku, $name, $groupName, $priceRaw, $costRaw, $trackRaw, $stockRaw, $stockMinRaw, $depositRaw] = $cols;
 
             $sku = trim($sku);
             $name = trim($name);
@@ -466,6 +518,10 @@ final class Api
             $costCents = Support::parseAmountToCents($costRaw);
             $stock = (int) round(Support::parseGermanDecimal($stockRaw));
             $stockMin = $stockRaw === '' ? 10 : (int) round(Support::parseGermanDecimal($stockMinRaw));
+            // A raw amount in the sheet resolves to (or creates) a reusable Pfand-Option by that
+            // exact amount, same convenience as an unknown Artikelgruppe getting created on the fly.
+            $depositCents = Support::parseAmountToCents($depositRaw);
+            $depositTypeId = $depositCents > 0 ? $this->depositTypes->findOrCreateByAmount($depositCents) : null;
 
             $match = ($sku !== '' && isset($bySku[$sku])) ? $bySku[$sku] : ($byName[mb_strtolower($name)] ?? null);
 
@@ -479,11 +535,12 @@ final class Api
                     $stock,
                     $stockMin,
                     $trackStock,
-                    $sku !== '' ? $sku : null
+                    $sku !== '' ? $sku : null,
+                    $depositTypeId
                 );
                 $updated++;
             } else {
-                $this->products->create($name, $category['name'], $priceCents, $costCents, $stock, $stockMin, $trackStock, $sku !== '' ? $sku : null);
+                $this->products->create($name, $category['name'], $priceCents, $costCents, $stock, $stockMin, $trackStock, $sku !== '' ? $sku : null, $depositTypeId);
                 $created++;
             }
         }
@@ -526,7 +583,8 @@ final class Api
             (int) ($b['stock'] ?? 0),
             (int) ($b['stockMin'] ?? 10),
             $trackStock,
-            self::normalizeSku($b['sku'] ?? null)
+            self::normalizeSku($b['sku'] ?? null),
+            self::normalizeDepositTypeId($b['depositTypeId'] ?? null)
         );
         return ['id' => $id];
     }
@@ -535,6 +593,11 @@ final class Api
     {
         $sku = trim((string) $sku);
         return $sku === '' ? null : $sku;
+    }
+
+    private static function normalizeDepositTypeId(mixed $depositTypeId): ?int
+    {
+        return empty($depositTypeId) ? null : (int) $depositTypeId;
     }
 
     private function updateProduct(int $id): array
@@ -558,7 +621,8 @@ final class Api
             array_key_exists('stock', $b) ? (int) $b['stock'] : null,
             array_key_exists('stockMin', $b) ? (int) $b['stockMin'] : null,
             array_key_exists('trackStock', $b) ? (bool) $b['trackStock'] : null,
-            self::normalizeSku($b['sku'] ?? null)
+            self::normalizeSku($b['sku'] ?? null),
+            self::normalizeDepositTypeId($b['depositTypeId'] ?? null)
         );
         return ['ok' => true];
     }
@@ -644,6 +708,20 @@ final class Api
                 }
             }
         }
+
+        // Pfand-Rückgabe lines in the same cart (e.g. new drinks + a returned Krug, one combined
+        // checkout) — picks a Pfand-Option directly, not a specific article; the register doesn't
+        // need to know which drink a returned Krug held. Resolved server-side like everything
+        // else here, never trusted from the client.
+        $returnLines = [];
+        foreach ((array) ($b['returns'] ?? []) as $r) {
+            $depositType = $this->depositTypes->find((int) ($r['depositTypeId'] ?? 0));
+            if ($depositType === null) {
+                throw new ApiException(404, 'Pfand-Option nicht gefunden');
+            }
+            $returnLines[] = ['depositType' => $depositType, 'qty' => (int) ($r['qty'] ?? 0)];
+        }
+
         $trackStock = $this->settings->bool('track_stock', true);
         return $this->sales->create(
             $items,
@@ -651,7 +729,8 @@ final class Api
             (string) ($b['payment'] ?? 'cash'),
             (int) ($b['givenCents'] ?? 0),
             $trackStock,
-            $clientUuid
+            $clientUuid,
+            $returnLines
         );
     }
 

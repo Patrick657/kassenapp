@@ -94,6 +94,9 @@ a { color: var(--accent); }
 .cat-row { flex: none; display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
 .cat-chip { flex: none; padding: 10px 18px; border-radius: 99px; font-size: 13.5px; font-weight: 700; background: #fff; color: rgba(0,0,0,.6); }
 .cat-chip.active { background: var(--ink); color: #fff; }
+.pfand-return-row { flex: none; display: flex; flex-wrap: wrap; gap: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+.pfand-return-tile { flex: none; padding: 16px 18px; min-height: 52px; border-radius: 12px; font-size: 13.5px; font-weight: 700; background: var(--warn-fill); color: var(--warn-text); }
+.pfand-return-tile:active { transform: scale(.96); }
 .tile-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 10px; }
 .tile {
@@ -111,6 +114,7 @@ a { color: var(--accent); }
 .tile-bottom { margin-top: auto; display: flex; align-items: baseline; justify-content: space-between; }
 .tile-price { font-size: 17px; font-weight: 600; }
 .tile-cat { font-size: 11px; font-weight: 600; color: var(--text-4); }
+.tile-pfand { font-size: 10.5px; font-weight: 600; color: var(--text-4); }
 
 /* ---- Cart ---- */
 .cart {
@@ -132,6 +136,10 @@ a { color: var(--accent); }
 .cart-line-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cart-line-unit { font-size: 11px; color: var(--text-3); }
 .cart-line-sum { font-size: 15px; font-weight: 600; min-width: 66px; text-align: right; }
+.cart-line-pfand { font-size: 11px; color: var(--text-3); padding-left: 40px; margin-top: 2px; }
+.return-line { background: var(--warn-fill); }
+.return-line.selected { box-shadow: inset 0 0 0 1.5px var(--warn-text); }
+.return-amount { color: var(--warn-text); }
 .cart-line-actions { display: flex; gap: 6px; margin-top: 9px; }
 .cart-line-actions button { flex: 1; padding: 9px; border-radius: 9px; background: var(--fill); font-size: 16px; font-weight: 700; text-align: center; }
 .cart-line-actions .price-btn { flex: 2; font-size: 12px; }
@@ -145,9 +153,13 @@ a { color: var(--accent); }
 .discount-chip { padding: 7px 10px; border-radius: 8px; font-size: 11.5px; font-weight: 700; background: var(--fill); color: rgba(0,0,0,.6); }
 .discount-chip.active { background: var(--ink); color: #fff; }
 .discount-value { font-size: 13px; color: var(--warn-text); }
+.pfand-row { font-size: 13px; color: var(--text-2); }
+.pfand-row .negative { color: var(--warn-text); }
 .total-row { align-items: baseline; padding-top: 4px; }
 .total-row .label { font-size: 15px; font-weight: 700; }
 .total-row .value { font-size: 30px; font-weight: 600; letter-spacing: -.02em; }
+.total-row .value.negative { color: var(--warn-text); }
+.payout-hint { text-align: center; font-size: 12px; font-weight: 600; color: var(--text-3); padding: 4px 0 2px; }
 .pay-switch { display: flex; gap: 6px; background: var(--fill); padding: 3px; border-radius: 11px; }
 .pay-switch button { flex: 1; padding: 11px; border-radius: 9px; font-size: 13.5px; font-weight: 700; color: rgba(0,0,0,.5); }
 .pay-switch button.active { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.14); color: var(--ink); }

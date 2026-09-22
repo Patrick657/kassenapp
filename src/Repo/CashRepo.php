@@ -16,13 +16,13 @@ final class CashRepo
         return (int) $this->db->query('SELECT COALESCE(SUM(amount_cents), 0) FROM cash_movements')->fetchColumn();
     }
 
-    public function insert(string $type, int $amountCents, string $note, ?int $saleId = null, ?int $productId = null, ?int $qty = null): int
+    public function insert(string $type, int $amountCents, string $note, ?int $saleId = null, ?int $productId = null, ?int $qty = null, ?int $depositTypeId = null): int
     {
         $stmt = $this->db->prepare(
-            'INSERT INTO cash_movements (occurred_at, type, amount_cents, note, sale_id, product_id, qty)
-             VALUES (NOW(), ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO cash_movements (occurred_at, type, amount_cents, note, sale_id, product_id, qty, deposit_type_id)
+             VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$type, $amountCents, $note, $saleId, $productId, $qty]);
+        $stmt->execute([$type, $amountCents, $note, $saleId, $productId, $qty, $depositTypeId]);
         return (int) $this->db->lastInsertId();
     }
 

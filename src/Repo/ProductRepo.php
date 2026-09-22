@@ -12,11 +12,17 @@ final class ProductRepo
     {
     }
 
-    /** Active (non-archived) products with lifetime sold quantity, for the POS and Artikel tab. */
+    /**
+     * Active (non-archived) products with lifetime sold quantity, for the POS and Artikel tab.
+     * deposit_cents is resolved live from the assigned Pfand-Option (deposit_types.amount_cents),
+     * not stored on the row — repricing an option updates every article that uses it immediately.
+     */
     public function listActive(): array
     {
-        $sql = "SELECT p.*, COALESCE(sq.qty, 0) AS sold_qty, COALESCE(sq.revenue_cents, 0) AS sold_revenue_cents
+        $sql = "SELECT p.*, dt.name AS deposit_type_name, COALESCE(dt.amount_cents, 0) AS deposit_cents,
+                       COALESCE(sq.qty, 0) AS sold_qty, COALESCE(sq.revenue_cents, 0) AS sold_revenue_cents
                 FROM products p
+                LEFT JOIN deposit_types dt ON dt.id = p.deposit_type_id
                 LEFT JOIN (
                     SELECT si.product_id, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS revenue_cents
                     FROM sale_items si
@@ -30,36 +36,42 @@ final class ProductRepo
 
     public function find(int $id): ?array
     {
-        $stmt = $this->db->prepare('SELECT * FROM products WHERE id = ? AND archived_at IS NULL');
+        $stmt = $this->db->prepare(
+            'SELECT p.*, dt.name AS deposit_type_name, COALESCE(dt.amount_cents, 0) AS deposit_cents
+             FROM products p LEFT JOIN deposit_types dt ON dt.id = p.deposit_type_id
+             WHERE p.id = ? AND p.archived_at IS NULL'
+        );
         $stmt->execute([$id]);
         $row = $stmt->fetch();
         return $row ?: null;
     }
 
-    public function create(string $name, string $category, int $priceCents, int $costCents, int $stock, int $stockMin, bool $trackStock, ?string $sku = null): int
+    public function create(string $name, string $category, int $priceCents, int $costCents, int $stock, int $stockMin, bool $trackStock, ?string $sku = null, ?int $depositTypeId = null): int
     {
         $next = (int) $this->db->query('SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products')->fetchColumn();
         $stmt = $this->db->prepare(
-            'INSERT INTO products (name, sku, category, price_cents, cost_cents, stock, stock_min, track_stock, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO products (name, sku, category, price_cents, deposit_type_id, cost_cents, stock, stock_min, track_stock, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$name, $sku, $category, $priceCents, $costCents, $stock, $stockMin, $trackStock ? 1 : 0, $next]);
+        $stmt->execute([$name, $sku, $category, $priceCents, $depositTypeId, $costCents, $stock, $stockMin, $trackStock ? 1 : 0, $next]);
         return (int) $this->db->lastInsertId();
     }
 
-    public function update(int $id, string $name, string $category, int $priceCents, int $costCents, ?int $stock, ?int $stockMin, ?bool $trackStock, ?string $sku = null): void
+    /** $depositTypeId: null means "kein Pfand" — always a definite value, the article form resends it every save. */
+    public function update(int $id, string $name, string $category, int $priceCents, int $costCents, ?int $stock, ?int $stockMin, ?bool $trackStock, ?string $sku, ?int $depositTypeId): void
     {
         $product = $this->find($id);
         if ($product === null) {
             throw new ApiException(404, 'Artikel nicht gefunden');
         }
         $stmt = $this->db->prepare(
-            'UPDATE products SET name = ?, category = ?, price_cents = ?, cost_cents = ?, stock = ?, stock_min = ?, track_stock = ?, sku = ? WHERE id = ?'
+            'UPDATE products SET name = ?, category = ?, price_cents = ?, deposit_type_id = ?, cost_cents = ?, stock = ?, stock_min = ?, track_stock = ?, sku = ? WHERE id = ?'
         );
         $stmt->execute([
             $name,
             $category,
             $priceCents,
+            $depositTypeId,
             $costCents,
             $stock ?? (int) $product['stock'],
             $stockMin ?? (int) $product['stock_min'],

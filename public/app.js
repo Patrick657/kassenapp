@@ -71,6 +71,7 @@ const state = {
   shopName: 'Festkasse',
   settings: { trackStock: true, warnLow: true, cardEnabled: true, requireCode: true },
   products: [],
+  depositTypes: [],
   cashBalanceCents: 0,
   todayRevenueCents: 0,
   access: { unlocked: false, expiresAt: null, codeConfigured: false },
@@ -104,7 +105,7 @@ const state = {
   toast: '',
   clock: '',
 
-  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null },
+  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, depositTypes: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null },
 };
 
 let toastTimer = null;
@@ -123,6 +124,7 @@ async function loadBootstrap() {
   state.shopName = data.shopName;
   state.settings = data.settings;
   state.products = data.products;
+  state.depositTypes = data.depositTypes || [];
   state.cashBalanceCents = data.cashBalanceCents;
   state.todayRevenueCents = data.todayRevenueCents;
   state.access = data.access;
@@ -170,12 +172,12 @@ function findProduct(id) { return state.products.find((p) => p.id === id); }
 function addToCart(product) {
   const track = state.settings.trackStock && product.trackStock;
   if (track && product.stock <= 0) return showToast(product.name + ' ist ausverkauft');
-  const line = state.cart.find((l) => l.productId === product.id);
+  const line = state.cart.find((l) => l.productId === product.id && l.kind !== 'return');
   if (line) {
     if (track && line.qty >= product.stock) return showToast('Nur noch ' + product.stock + '× auf Lager');
     line.qty++;
   } else {
-    state.cart.push({ key: uid(), productId: product.id, name: product.name, priceCents: product.priceCents, qty: 1 });
+    state.cart.push({ key: uid(), productId: product.id, name: product.name, priceCents: product.priceCents, depositCents: product.depositCents || 0, qty: 1 });
   }
   state.tender = 0;
   renderMain();
@@ -204,25 +206,49 @@ function clearCart() {
 }
 function totals() {
   const sub = state.cart.reduce((s, l) => s + l.priceCents * l.qty, 0);
+  const pfand = state.cart.reduce((s, l) => s + (l.depositCents || 0) * l.qty, 0);
   const disc = Math.min(state.discount, sub);
-  return { sub, disc, total: Math.max(0, sub - disc) };
+  return { sub, disc, pfand, total: Math.max(0, sub - disc) + pfand };
+}
+
+/**
+ * One tap adds a return line to the current cart (qty 1, +1 per further tap) — it is NOT booked
+ * yet, just like tapping a normal product tile. It's settled together with whatever else is in
+ * the cart in one combined checkout() call, which is exactly the point: a customer returning
+ * Krüge while ordering something new sees one net amount, not two separate bookings.
+ */
+function addDepositReturnToCart(depositTypeId) {
+  const type = state.depositTypes.find((t) => t.id === depositTypeId);
+  if (!type) return;
+  const line = state.cart.find((l) => l.kind === 'return' && l.depositTypeId === type.id);
+  if (line) {
+    line.qty++;
+  } else {
+    state.cart.push({ key: uid(), kind: 'return', depositTypeId: type.id, name: type.name, priceCents: 0, depositCents: -type.amountCents, qty: 1 });
+  }
+  state.tender = 0;
+  renderMain();
 }
 
 async function checkout() {
   const { cart, payment, tender } = state;
   if (!cart.length) return showToast('Warenkorb ist leer');
   const { total } = totals();
-  if (payment === 'cash' && tender < total) return showToast('Betrag noch nicht ausreichend');
+  // A net amount <= 0 (nothing to collect, or the register owes the customer) is always settled
+  // in cash — there's nothing for a card to charge, and Pfand is refunded in cash either way.
+  const effectivePayment = total > 0 ? payment : 'cash';
+  if (total > 0 && effectivePayment === 'cash' && tender < total) return showToast('Betrag noch nicht ausreichend');
   const clientUuid = uid();
   try {
     const receipt = await api('/sales', {
       method: 'POST',
       body: {
         clientUuid,
-        items: cart.map((l) => ({ productId: l.productId, name: l.name, unitCents: l.priceCents, qty: l.qty })),
+        items: cart.filter((l) => l.kind !== 'return').map((l) => ({ productId: l.productId, name: l.name, unitCents: l.priceCents, qty: l.qty })),
+        returns: cart.filter((l) => l.kind === 'return').map((l) => ({ depositTypeId: l.depositTypeId, qty: l.qty })),
         discountCents: state.discount,
-        payment,
-        givenCents: payment === 'cash' ? tender : total,
+        payment: effectivePayment,
+        givenCents: total > 0 ? (effectivePayment === 'cash' ? tender : total) : 0,
       },
     });
     state.cart = [];
@@ -291,15 +317,34 @@ async function submitForm() {
     if (f.kind === 'category') {
       const name = (f.name || '').trim();
       if (!name) return setFormError('Name fehlt');
+      const depositTypeId = f.depositTypeId || null;
       if (f.id) {
-        await guardedAdminCall(() => api('/categories/' + f.id, { method: 'PATCH', body: { name } }));
-        showToast('Gruppe umbenannt');
+        await guardedAdminCall(() => api('/categories/' + f.id, { method: 'PATCH', body: { name, depositTypeId } }));
+        if (f.applyExisting) {
+          await guardedAdminCall(() => api('/categories/' + f.id + '/apply-deposit-type', { method: 'POST', body: { depositTypeId } }));
+        }
+        showToast('Gruppe gespeichert');
       } else {
-        await guardedAdminCall(() => api('/categories', { method: 'POST', body: { name, trackStockDefault: !!f.trackStockDefault } }));
+        await guardedAdminCall(() => api('/categories', { method: 'POST', body: { name, trackStockDefault: !!f.trackStockDefault, depositTypeId } }));
         showToast('Gruppe angelegt');
       }
       closeForm();
-      await loadCategories();
+      await Promise.all([loadCategories(), loadAdminProducts()]);
+      renderHeader();
+      renderMain();
+      return;
+    }
+    if (f.kind === 'deposit-type') {
+      const name = (f.name || '').trim();
+      if (!name) return setFormError('Name fehlt');
+      const amountCents = toCents(f.amount || '0');
+      if (amountCents <= 0) return setFormError('Betrag muss größer als 0 sein');
+      const body = { name, amount: f.amount || '0' };
+      await guardedAdminCall(() => (f.id ? api('/deposit-types/' + f.id, { method: 'PATCH', body }) : api('/deposit-types', { method: 'POST', body })));
+      closeForm();
+      showToast(f.id ? 'Pfand-Option gespeichert' : 'Pfand-Option angelegt');
+      await Promise.all([loadDepositTypes(), loadBootstrap()]);
+      renderHeader();
       renderMain();
       return;
     }
@@ -315,6 +360,7 @@ async function submitForm() {
         category: f.category,
         priceCents: price,
         costCents: toCents(f.cost || '0'),
+        depositTypeId: f.depositTypeId || null,
       };
       if (state.settings.trackStock) {
         body.trackStock = !!f.trackStock;
@@ -418,6 +464,11 @@ async function loadCategories() {
   if (data) state.admin.categories = data;
   return data;
 }
+async function loadDepositTypes() {
+  const data = await guardedAdminCall(() => api('/deposit-types'));
+  if (data) state.admin.depositTypes = data;
+  return data;
+}
 async function loadJournal(before) {
   const data = await guardedAdminCall(() => api('/journal' + (before ? '?before=' + before + '&limit=80' : '?limit=80')));
   if (data) {
@@ -447,8 +498,9 @@ async function enterAdminTab(tab) {
   renderMain();
   if (tab === 'overview') await loadOverview();
   else if (tab === 'analytics') await loadGroups();
-  else if (tab === 'groups') await loadCategories();
-  else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories()]);
+  else if (tab === 'groups') await Promise.all([loadCategories(), loadDepositTypes()]);
+  else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories(), loadDepositTypes()]);
+  else if (tab === 'deposit') await loadDepositTypes();
   else if (tab === 'users') await Promise.all([loadUsers(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
   else if (tab === 'cash') await loadCashStatus();
@@ -633,7 +685,7 @@ function renderPos() {
   );
   const visible = state.products.filter((p) => state.cat === 'Alle' || p.category === state.cat);
   const showStock = state.settings.trackStock;
-  const { sub, disc, total } = totals();
+  const { sub, disc, pfand, total } = totals();
   const change = state.tender - total;
   const cartCount = state.cart.reduce((a, l) => a + l.qty, 0);
 
@@ -649,11 +701,26 @@ function renderPos() {
     return `<button data-action="add-to-cart" data-id="${p.id}" class="tile ${out ? 'out' : ''}">
       <div class="tile-top"><span class="tile-name">${esc(p.name)}</span>${badge}</div>
       <div class="tile-bottom"><span class="tile-price mono">${eur(p.priceCents)}</span><span class="tile-cat">${esc(p.category)}</span></div>
+      ${p.depositCents ? `<div class="tile-pfand">+ Pfand ${eur(p.depositCents)}</div>` : ''}
     </button>`;
   }).join('');
 
   const cartLines = state.cart.map((l) => {
     const open = state.selected === l.key;
+    if (l.kind === 'return') {
+      return `<div class="cart-line return-line ${open ? 'selected' : ''}" data-action="select-line" data-key="${l.key}">
+        <div class="cart-line-row">
+          <span class="cart-line-qty mono">${l.qty}×</span>
+          <span class="cart-line-name">↩ Pfand zurück · ${esc(l.name)}</span>
+          <span class="cart-line-sum mono return-amount">${eur(l.depositCents * l.qty)}</span>
+        </div>
+        ${open ? `<div class="cart-line-actions">
+          <button data-action="line-dec" data-key="${l.key}">−</button>
+          <button data-action="line-inc" data-key="${l.key}">+</button>
+          <button data-action="line-del" data-key="${l.key}" class="del-btn">Entfernen</button>
+        </div>` : ''}
+      </div>`;
+    }
     return `<div class="cart-line ${open ? 'selected' : ''}" data-action="select-line" data-key="${l.key}">
       <div class="cart-line-row">
         <span class="cart-line-qty mono">${l.qty}×</span>
@@ -661,6 +728,7 @@ function renderPos() {
         <span class="cart-line-unit mono">${eur(l.priceCents)}</span>
         <span class="cart-line-sum mono">${eur(l.priceCents * l.qty)}</span>
       </div>
+      ${l.depositCents ? `<div class="cart-line-pfand">zzgl. Pfand ${l.qty}× ${eur(l.depositCents)} = ${eur(l.depositCents * l.qty)}</div>` : ''}
       ${open ? `<div class="cart-line-actions">
         <button data-action="line-dec" data-key="${l.key}">−</button>
         <button data-action="line-inc" data-key="${l.key}">+</button>
@@ -673,26 +741,41 @@ function renderPos() {
   const discountOptions = [0, 50, 100, 200];
   const discountChips = discountOptions.map((v) => `<button data-action="set-discount" data-value="${v}" class="discount-chip ${state.discount === v ? 'active' : ''}">${v === 0 ? 'kein Rabatt' : '−' + eur(v).replace(' €', '€')}</button>`).join('');
 
-  const canPayReady = state.payment === 'card' || (state.tender >= total && total >= 0);
-  const checkoutLabel = state.payment === 'card'
-    ? 'Kartenzahlung abschließen · ' + eur(total)
-    : (state.tender >= total && state.tender > 0 ? 'Kassieren · Rückgeld ' + eur(Math.max(0, change)) : 'Kassieren · ' + eur(total));
+  // A net amount <= 0 means nothing to collect (or the register owes the customer) — settled in
+  // one tap, no payment method or tender needed (see checkout()'s effectivePayment logic).
+  const netNegative = total < 0;
+  const netZero = total === 0;
+  const canPayReady = netNegative || netZero ? true : (state.payment === 'card' || state.tender >= total);
+  const checkoutLabel = netNegative
+    ? 'Auszahlen · ' + eur(Math.abs(total))
+    : netZero
+      ? 'Abschließen · 0,00 €'
+      : (state.payment === 'card'
+        ? 'Kartenzahlung abschließen · ' + eur(total)
+        : (state.tender >= total && state.tender > 0 ? 'Kassieren · Rückgeld ' + eur(Math.max(0, change)) : 'Kassieren · ' + eur(total)));
+
+  const returnEligible = state.depositTypes;
 
   document.getElementById('main-root').innerHTML = `
   <div class="pos">
     <section class="pos-left">
       <div class="cat-row">${cats.map((c) => `<button data-action="set-cat" data-cat="${esc(c)}" class="cat-chip ${state.cat === c ? 'active' : ''}">${esc(c)}</button>`).join('')}</div>
       <div class="tile-scroll"><div class="tile-grid">${tiles}</div></div>
+      ${returnEligible.length ? `<div class="pfand-return-row">${returnEligible.map((t) => `<button data-action="add-deposit-return" data-id="${t.id}" class="pfand-return-tile">↩ ${esc(t.name)} · −${eur(t.amountCents)}</button>`).join('')}</div>` : ''}
     </section>
     <aside class="cart">
-      <div class="cart-head"><span class="title">Warenkorb · ${cartCount}</span><button data-action="clear-cart" class="clear">Leeren</button></div>
+      <div class="cart-head">
+        <span class="title">Warenkorb · ${cartCount}</span>
+        <button data-action="clear-cart" class="clear">Leeren</button>
+      </div>
       <div class="cart-lines">
         ${state.cart.length === 0 ? `<div class="cart-empty"><span class="icon">🧾</span><span class="hint">Artikel antippen zum Hinzufügen</span></div>` : cartLines}
       </div>
       <div class="cart-sums">
         <div class="row-between subtotal-row"><span>Zwischensumme</span><span class="mono">${eur(sub)}</span></div>
         <div class="row-between discount-row"><div class="discount-chips">${discountChips}</div><span class="discount-value mono">${disc ? '−' + eur(disc) : ''}</span></div>
-        <div class="row-between total-row"><span class="label">Zu zahlen</span><span class="value mono">${eur(total)}</span></div>
+        ${pfand ? `<div class="row-between pfand-row"><span>${pfand < 0 ? 'Pfand-Rückgabe' : 'zzgl. Pfand'}</span><span class="mono ${pfand < 0 ? 'negative' : ''}">${eur(pfand)}</span></div>` : ''}
+        <div class="row-between total-row"><span class="label">${netNegative ? 'Auszahlung an Kunde' : 'Zu zahlen'}</span><span class="value mono ${netNegative ? 'negative' : ''}">${eur(Math.abs(total))}</span></div>
         ${state.settings.cardEnabled ? `<div class="pay-switch">
           <button data-action="set-payment" data-value="cash" class="${state.payment === 'cash' ? 'active' : ''}">Bar</button>
           <button data-action="set-payment" data-value="card" class="${state.payment === 'card' ? 'active' : ''}">Karte</button>
@@ -711,6 +794,7 @@ function renderPos() {
             <div class="change-breakdown">${change > 0 ? breakdown(change) : (state.tender > 0 && total > 0 ? (change < 0 ? 'fehlen ' + eur(-change) : 'passend') : '')}</div>
           </div>
         </div>` : ''}
+        ${netNegative ? `<div class="payout-hint">Wird bar ausgezahlt</div>` : ''}
       </div>
       <div class="cart-footer">
         <button data-action="checkout" class="checkout-btn ${state.cart.length && canPayReady ? 'ready' : ''} ${!state.cart.length ? 'empty' : ''}">${esc(checkoutLabel)}</button>
@@ -723,7 +807,7 @@ function renderPos() {
  * Rendering — Admin
  * ------------------------------------------------------------------- */
 function adminTabsList() {
-  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
+  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['deposit', 'Pfand'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
   return tabs.filter((t) => t[0] !== 'stock' || state.settings.trackStock);
 }
 
@@ -797,13 +881,29 @@ function renderGroupsTab() {
         <button data-action="new-category" class="btn-primary">+ Neue Gruppe</button>
       </div>
       ${cats.map((c) => `<div class="settings-row" data-action="toggle-category-default" data-id="${c.id}">
-        <div><div class="title">${esc(c.name)}</div><div class="hint">${c.productCount} Artikel · Lagerbestand-Standard für neue Artikel</div></div>
+        <div><div class="title">${esc(c.name)}</div><div class="hint">${c.productCount} Artikel · Lagerbestand-Standard für neue Artikel${c.depositTypeName ? ' · Pfand-Standard ' + esc(c.depositTypeName) + ' (' + eur(c.depositTypeAmountCents) + ')' : ''}</div></div>
         <div style="display:flex;align-items:center;gap:14px">
           <div class="switch-track ${c.trackStockDefault ? 'on' : ''}"><div class="switch-knob"></div></div>
-          <button data-action="rename-category" data-id="${c.id}">Umbenennen</button>
+          <button data-action="rename-category" data-id="${c.id}">Bearbeiten</button>
           <button data-action="delete-category" data-id="${c.id}" data-name="${esc(c.name)}" class="del">✕</button>
         </div>
       </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch keine Artikelgruppe angelegt.</div>'}
+    </div>`;
+}
+
+function renderDepositTab() {
+  const types = state.admin.depositTypes;
+  if (!types) return '<p>Lädt…</p>';
+  return `
+    <div class="card-box">
+      <div class="table-head-row" style="padding:0 0 12px">
+        <div><div class="title">Pfand-Optionen</div><div class="subtitle">Zentral verwaltete Pfandbeträge, wählbar pro Artikelgruppe oder Artikel</div></div>
+        <button data-action="new-deposit-type" class="btn-primary">+ Neue Pfand-Option</button>
+      </div>
+      ${types.map((t) => `<div class="settings-row" data-action="edit-deposit-type" data-id="${t.id}">
+        <div><div class="title">${esc(t.name)}</div><div class="hint">${eur(t.amountCents)} · ${t.productCount} Artikel</div></div>
+        <button data-action="delete-deposit-type" data-id="${t.id}" data-name="${esc(t.name)}" class="del">✕</button>
+      </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch keine Pfand-Option angelegt · lege z.B. "Krug" mit 3,00 € an.</div>'}
     </div>`;
 }
 
@@ -867,7 +967,7 @@ function renderArticlesTab() {
     const tracked = showStock && p.trackStock;
     const stockColor = !tracked ? 'var(--text-4)' : p.stock <= 0 ? 'var(--err-text)' : p.stock <= p.stockMin ? 'var(--warn-text)' : 'var(--ink)';
     return `<div class="article-row ${state.focusProduct === p.id ? 'focused' : ''}" id="artikel-${p.id}">
-      <span>${esc(p.name)}${p.sku ? `<span style="display:block;font-size:10.5px;font-weight:400;color:var(--text-3)">Art.-Nr. ${esc(p.sku)}</span>` : ''}</span>
+      <span>${esc(p.name)}${p.sku ? `<span style="display:block;font-size:10.5px;font-weight:400;color:var(--text-3)">Art.-Nr. ${esc(p.sku)}</span>` : ''}${p.depositCents ? `<span style="display:block;font-size:10.5px;font-weight:400;color:var(--text-3)">Pfand ${eur(p.depositCents)}</span>` : ''}</span>
       <span class="link" data-action="filter-category" data-cat="${esc(p.category)}">${esc(p.category)}</span>
       <span class="num mono">${eur(p.priceCents)}</span>
       <span class="num mono">${eur(p.costCents)}</span>
@@ -929,10 +1029,10 @@ function renderStockTab() {
 function renderJournalTab() {
   const items = state.admin.journal;
   if (!items) return '<p>Lädt…</p>';
-  const tagStyles = { sale: 'background:var(--sale-fill);color:var(--sale-text)', in: 'background:var(--info-fill);color:var(--info-text)', out: 'background:var(--warn-fill);color:var(--warn-text)', close: 'background:var(--ink);color:#fff', delivery: 'background:var(--subtle);color:var(--text-3)' };
-  const tagText = { sale: 'Verkauf', in: 'Einlage', out: 'Entnahme', close: 'Z-Abschluss', delivery: 'Warenzugang' };
+  const tagStyles = { sale: 'background:var(--sale-fill);color:var(--sale-text)', in: 'background:var(--info-fill);color:var(--info-text)', out: 'background:var(--warn-fill);color:var(--warn-text)', close: 'background:var(--ink);color:#fff', delivery: 'background:var(--subtle);color:var(--text-3)', deposit_return: 'background:var(--warn-fill);color:var(--warn-text)' };
+  const tagText = { sale: 'Verkauf', in: 'Einlage', out: 'Entnahme', close: 'Z-Abschluss', delivery: 'Warenzugang', deposit_return: 'Pfand zurück' };
   const rows = items.map((m) => {
-    const clickable = m.type === 'sale' && m.receiptNo;
+    const clickable = (m.type === 'sale' || m.type === 'deposit_return') && m.receiptNo;
     const amount = m.type === 'delivery' ? '–' : (m.amountCents > 0 ? '+' : '') + eur(m.amountCents);
     const color = m.type === 'delivery' ? 'var(--text-4)' : m.amountCents < 0 ? 'var(--warn-text)' : 'var(--ink)';
     return `<div class="journal-row ${clickable ? 'clickable' : ''}" ${clickable ? `data-action="open-receipt" data-no="${esc(m.receiptNo)}"` : ''}>
@@ -1026,11 +1126,12 @@ function renderSettingsTab() {
 
 function renderAdmin() {
   const tabs = adminTabsList();
-  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
+  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', deposit: 'Pfand', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
   let content = '';
   if (state.adminTab === 'overview') content = renderOverviewTab();
   else if (state.adminTab === 'analytics') content = renderAnalyticsTab();
   else if (state.adminTab === 'groups') content = renderGroupsTab();
+  else if (state.adminTab === 'deposit') content = renderDepositTab();
   else if (state.adminTab === 'articles') content = renderArticlesTab();
   else if (state.adminTab === 'stock') content = renderStockTab();
   else if (state.adminTab === 'users') content = renderUsersTab();
@@ -1076,17 +1177,28 @@ function renderMain() {
  * ------------------------------------------------------------------- */
 function renderReceiptOverlay() {
   const rc = state.receipt;
-  const rows = [{ label: 'Summe', value: eur(rc.subtotalCents), weight: 500, size: '13px' }];
-  if (rc.discountCents) rows.push({ label: 'Rabatt', value: '−' + eur(rc.discountCents), weight: 500, size: '13px' });
-  rows.push({ label: 'Zu zahlen', value: eur(rc.totalCents), weight: 800, size: '17px' });
-  rows.push({ label: rc.payment === 'cash' ? 'Bar gegeben' : 'Kartenzahlung', value: eur(rc.givenCents), weight: 500, size: '13px' });
-  if (rc.payment === 'cash') rows.push({ label: 'Rückgeld', value: eur(rc.changeCents), weight: 700, size: '14px' });
+  const net = rc.netCents;
+  const rows = [];
+  if (rc.items.length) {
+    rows.push({ label: 'Summe', value: eur(rc.subtotalCents), weight: 500, size: '13px' });
+    if (rc.discountCents) rows.push({ label: 'Rabatt', value: '−' + eur(rc.discountCents), weight: 500, size: '13px' });
+    if (rc.depositCents) rows.push({ label: 'zzgl. Pfand', value: eur(rc.depositCents), weight: 500, size: '13px' });
+  }
+  if (rc.depositReturnedCents) rows.push({ label: 'Pfand-Rückgabe', value: '−' + eur(rc.depositReturnedCents), weight: 500, size: '13px' });
+  if (net >= 0) {
+    rows.push({ label: 'Zu zahlen', value: eur(net), weight: 800, size: '17px' });
+    rows.push({ label: rc.payment === 'cash' ? 'Bar gegeben' : 'Kartenzahlung', value: eur(rc.givenCents), weight: 500, size: '13px' });
+    if (rc.payment === 'cash') rows.push({ label: 'Rückgeld', value: eur(rc.changeCents), weight: 700, size: '14px' });
+  } else {
+    rows.push({ label: 'Auszahlung an Kunde', value: eur(Math.abs(net)), weight: 800, size: '17px' });
+  }
   return `<div class="overlay" id="receipt-overlay">
     <div class="receipt-card">
       <div class="receipt-shop">${esc(state.shopName)}</div>
       <div class="receipt-meta">${fmtDateTime(rc.soldAt)} · Bon ${esc(rc.receiptNo)}</div>
       <hr class="receipt-divider">
-      ${rc.items.map((i) => `<div class="receipt-line"><span class="qty mono">${i.qty}×</span><span class="name">${esc(i.name)}</span><span class="mono">${eur(i.unitCents * i.qty)}</span></div>`).join('')}
+      ${rc.items.map((i) => `<div class="receipt-line"><span class="qty mono">${i.qty}×</span><span class="name">${esc(i.name)}</span><span class="mono">${eur(i.unitCents * i.qty)}</span></div>${i.depositCents ? `<div class="receipt-line" style="color:var(--text-3);font-size:11.5px"><span class="qty"></span><span class="name">davon Pfand ${i.qty}× ${eur(i.depositCents)}</span><span class="mono">${eur(i.depositCents * i.qty)}</span></div>` : ''}`).join('')}
+      ${rc.returns.map((r) => `<div class="receipt-line" style="color:var(--warn-text)"><span class="qty mono">${r.qty}×</span><span class="name">↩ Pfand zurück · ${esc(r.name)}</span><span class="mono">−${eur(r.amountCents)}</span></div>`).join('')}
       <hr class="receipt-divider">
       ${rows.map((r) => `<div class="receipt-totals-row" style="font-weight:${r.weight};font-size:${r.size}"><span>${esc(r.label)}</span><span class="mono">${r.value}</span></div>`).join('')}
       <div class="receipt-footer"><div class="thanks">Vielen Dank für Ihren Einkauf</div><button data-action="close-receipt">Weiter</button></div>
@@ -1118,6 +1230,10 @@ function renderFormOverlay() {
     fields += F('Artikelnummer (optional)', 'sku', 'z.B. 10023');
     fields += `<div class="form-field"><label>Artikelgruppe</label><select data-form-key="category" ${cats.length ? '' : 'disabled'}>${catOptions}</select></div>`;
     fields += F('Verkaufspreis (€)', 'price', '3,50') + F('Einkaufspreis (€)', 'cost', '1,20');
+    const depositTypes = state.admin.depositTypes || [];
+    const depositOptions = '<option value="">Kein Pfand</option>' + depositTypes.map((t) => `<option value="${t.id}" ${f.depositTypeId === t.id ? 'selected' : ''}>${esc(t.name)} · ${eur(t.amountCents)}</option>`).join('');
+    fields += `<div class="form-field"><label>Pfand</label><select data-form-key="depositTypeId">${depositOptions}</select></div>`;
+    if (!depositTypes.length) hint = 'Lege zuerst unter "Pfand" mindestens eine Option an, falls dieser Artikel Pfand haben soll.';
     if (state.settings.trackStock) {
       fields += `<div class="settings-row" data-action="toggle-form-trackstock" style="padding:12px 0;cursor:pointer">
         <div><div class="title" style="font-size:13px;font-weight:600">Lagerbestand für diesen Artikel führen</div><div class="hint" style="font-size:11px;color:var(--text-3)">Aus, wenn dieser Artikel nicht gezählt werden soll (z. B. Fassbier)</div></div>
@@ -1132,7 +1248,7 @@ function renderFormOverlay() {
     fields = F('Neuer Zugangscode', 'accessCode', 'z. B. 1234') + F('Neues Löschkennwort (optional)', 'deleteCode', 'unverändert lassen');
     submitLabel = 'Zurücksetzen';
   } else if (f.kind === 'category') {
-    title = f.id ? 'Gruppe umbenennen' : 'Neue Artikelgruppe';
+    title = f.id ? 'Gruppe bearbeiten' : 'Neue Artikelgruppe';
     fields = F('Name', 'name', 'z. B. Merchandise');
     if (!f.id) {
       fields += `<div class="settings-row" data-action="toggle-form-trackstockdefault" style="padding:12px 0;cursor:pointer">
@@ -1140,6 +1256,20 @@ function renderFormOverlay() {
         <div class="switch-track ${f.trackStockDefault ? 'on' : ''}"><div class="switch-knob"></div></div>
       </div>`;
     }
+    const depositTypes = state.admin.depositTypes || [];
+    const depositOptions = '<option value="">Kein Pfand</option>' + depositTypes.map((t) => `<option value="${t.id}" ${f.depositTypeId === t.id ? 'selected' : ''}>${esc(t.name)} · ${eur(t.amountCents)}</option>`).join('');
+    fields += `<div class="form-field"><label>Pfand-Standard für neue Artikel</label><select data-form-key="depositTypeId">${depositOptions}</select></div>`;
+    if (f.id) {
+      fields += `<div class="settings-row" data-action="toggle-form-applyexisting" style="padding:12px 0;cursor:pointer">
+        <div><div class="title" style="font-size:13px;font-weight:600">Auch auf die ${f.productCount || 0} bestehenden Artikel dieser Gruppe anwenden</div><div class="hint" style="font-size:11px;color:var(--text-3)">Überschreibt das Pfand jedes Artikels in dieser Gruppe sofort</div></div>
+        <div class="switch-track ${f.applyExisting ? 'on' : ''}"><div class="switch-knob"></div></div>
+      </div>`;
+    }
+    hint = depositTypes.length ? 'Neue Artikel dieser Gruppe übernehmen diese Auswahl automatisch, bleibt pro Artikel änderbar.' : 'Lege zuerst unter "Pfand" mindestens eine Option an, um sie hier zuzuweisen.';
+    submitLabel = f.id ? 'Speichern' : 'Anlegen';
+  } else if (f.kind === 'deposit-type') {
+    title = f.id ? 'Pfand-Option bearbeiten' : 'Neue Pfand-Option';
+    fields = F('Name', 'name', 'z. B. Krug') + F('Betrag (€)', 'amount', '3,00');
     submitLabel = f.id ? 'Speichern' : 'Anlegen';
   } else if (f.kind === 'user') {
     title = f.id ? 'Benutzer bearbeiten' : 'Neuer Benutzer';
@@ -1228,13 +1358,20 @@ function renderOverlay() {
       const evt = input.tagName === 'SELECT' ? 'change' : 'input';
       input.addEventListener(evt, () => {
         state.form[input.dataset.formKey] = input.value;
-        // New article: prefill the per-article stock toggle from the chosen group's default.
+        // New article: prefill the per-article stock/Pfand defaults from the chosen group.
         if (input.dataset.formKey === 'category' && state.form.kind === 'article' && !state.form.id) {
           const cat = (state.admin.categories || []).find((c) => c.name === input.value);
-          if (cat) { state.form.trackStock = cat.trackStockDefault; renderOverlay(); }
+          if (cat) {
+            state.form.trackStock = cat.trackStockDefault;
+            state.form.depositTypeId = cat.depositTypeId;
+            renderOverlay();
+          }
         }
         if (input.dataset.formKey === 'role' && state.form.kind === 'user') {
           renderOverlay();
+        }
+        if (input.dataset.formKey === 'depositTypeId' && (state.form.kind === 'category' || state.form.kind === 'article')) {
+          state.form.depositTypeId = input.value === '' ? null : Number(input.value);
         }
       });
     });
@@ -1307,10 +1444,10 @@ function onAction(e) {
       return void enterAdminTab('articles').then(() => { state.focusProduct = id; renderMain(); });
     }
     case 'show-group': state.adminTab = 'articles'; state.catFilter = d.name; state.focusProduct = null; return void enterAdminTab('articles');
-    case 'new-category': return openForm({ kind: 'category', name: '', trackStockDefault: true });
+    case 'new-category': return openForm({ kind: 'category', name: '', trackStockDefault: true, depositTypeId: null });
     case 'rename-category': {
       const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
-      return openForm({ kind: 'category', id: c.id, name: c.name });
+      return openForm({ kind: 'category', id: c.id, name: c.name, depositTypeId: c.depositTypeId, productCount: c.productCount, applyExisting: false });
     }
     case 'toggle-category-default': {
       const c = (state.admin.categories || []).find((x) => x.id === Number(d.id));
@@ -1331,6 +1468,24 @@ function onAction(e) {
       },
     });
     case 'toggle-form-trackstockdefault': state.form.trackStockDefault = !state.form.trackStockDefault; return renderOverlay();
+    case 'toggle-form-applyexisting': state.form.applyExisting = !state.form.applyExisting; return renderOverlay();
+    case 'new-deposit-type': return openForm({ kind: 'deposit-type', name: '', amount: '' });
+    case 'edit-deposit-type': {
+      const t = (state.admin.depositTypes || []).find((x) => x.id === Number(d.id));
+      if (!t) return;
+      return openForm({ kind: 'deposit-type', id: t.id, name: t.name, amount: String(t.amountCents / 100).replace('.', ',') });
+    }
+    case 'delete-deposit-type': return openForm({
+      kind: 'confirm', noCode: true, title: 'Pfand-Option löschen · ' + d.name,
+      hint: 'Nur möglich, solange keine Artikelgruppe und kein Artikel diese Option mehr verwendet.',
+      submitLabel: 'Pfand-Option löschen',
+      action: async () => {
+        await api('/deposit-types/' + d.id, { method: 'DELETE' });
+        showToast('Pfand-Option gelöscht');
+        await loadDepositTypes();
+        renderMain();
+      },
+    });
     case 'new-user': return openForm({ kind: 'user', name: '', role: 'cashier', pin: '', categoryIds: [], active: true });
     case 'edit-user': {
       const u = state.admin.users.find((x) => x.id === Number(d.id));
@@ -1363,13 +1518,13 @@ function onAction(e) {
     case 'new-article': {
       const cats = state.admin.categories || [];
       const defaultCat = cats[0];
-      const f = { kind: 'article', name: '', sku: '', category: defaultCat ? defaultCat.name : '', price: '', cost: '' };
+      const f = { kind: 'article', name: '', sku: '', category: defaultCat ? defaultCat.name : '', price: '', cost: '', depositTypeId: defaultCat ? defaultCat.depositTypeId : null };
       if (state.settings.trackStock) { f.trackStock = defaultCat ? defaultCat.trackStockDefault : true; f.stock = '0'; f.stockMin = '10'; }
       return openForm(f);
     }
     case 'edit-article': {
       const p = state.admin.products.find((x) => x.id === Number(d.id));
-      const f = { kind: 'article', id: p.id, name: p.name, sku: p.sku || '', category: p.category, price: String(p.priceCents / 100).replace('.', ','), cost: String(p.costCents / 100).replace('.', ',') };
+      const f = { kind: 'article', id: p.id, name: p.name, sku: p.sku || '', category: p.category, price: String(p.priceCents / 100).replace('.', ','), cost: String(p.costCents / 100).replace('.', ','), depositTypeId: p.depositTypeId };
       if (state.settings.trackStock) { f.trackStock = p.trackStock; f.stock = String(p.stock); f.stockMin = String(p.stockMin); }
       return openForm(f);
     }
@@ -1396,6 +1551,7 @@ function onAction(e) {
     case 'load-more-journal': return void loadJournal(state.admin.journalBefore).then(renderMain);
     case 'open-cash-in': return openForm({ kind: 'in', amount: '', note: '' });
     case 'open-cash-out': return openForm({ kind: 'out', amount: '', note: '' });
+    case 'add-deposit-return': return addDepositReturnToCart(Number(d.id));
     case 'close-day': return void guardedAdminCall(() => api('/z-reports', { method: 'POST' }))
       .then((res) => { if (!res) return; showToast('Z-' + res.no + ' gebucht · ' + eur(res.totalCents) + ' Umsatz'); return Promise.all([loadBootstrap(), loadCashStatus()]); })
       .catch((e) => showToast(e.message))
