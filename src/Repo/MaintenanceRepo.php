@@ -31,8 +31,8 @@ final class MaintenanceRepo
         $this->db->exec('SET FOREIGN_KEY_CHECKS = 1');
     }
 
-    /** Deletes everything, including products, and reseeds the demo article set from migrations/002_seed_demo.sql. */
-    public function resetToDemo(): void
+    /** Deletes everything, including products. Settings, Artikelgruppen and users survive. */
+    public function resetAll(): void
     {
         $this->db->exec('SET FOREIGN_KEY_CHECKS = 0');
         $this->db->exec('TRUNCATE TABLE sale_items');
@@ -41,10 +41,22 @@ final class MaintenanceRepo
         $this->db->exec('TRUNCATE TABLE z_reports');
         $this->db->exec('TRUNCATE TABLE products');
         $this->db->exec('SET FOREIGN_KEY_CHECKS = 1');
-        $seedFile = __DIR__ . '/../../migrations/002_seed_demo.sql';
-        $sql = file_get_contents($seedFile);
-        if ($sql !== false) {
-            $this->db->exec($sql);
+    }
+
+    /**
+     * Inserts the demo article set from migrations/002_seed_demo.sql and makes sure its
+     * Artikelgruppen exist. Callers must check the article list is empty first.
+     */
+    public function seedDemo(): void
+    {
+        $sql = file_get_contents(__DIR__ . '/../../migrations/002_seed_demo.sql');
+        if ($sql === false) {
+            throw new \RuntimeException('Demo-Daten nicht gefunden');
         }
+        $this->db->exec($sql);
+        $this->db->exec(
+            'INSERT IGNORE INTO categories (name, sort_order)
+             SELECT category, 0 FROM (SELECT DISTINCT category FROM products) AS existing'
+        );
     }
 }

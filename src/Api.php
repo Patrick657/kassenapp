@@ -360,6 +360,11 @@ final class Api
             return $this->reset();
         }
 
+        if ($method === 'POST' && $path === '/api/maintenance/demo') {
+            $this->auth->requireAccess();
+            return $this->seedDemo();
+        }
+
         throw new ApiException(404, 'Unbekannter Endpunkt');
     }
 
@@ -1019,8 +1024,18 @@ final class Api
     {
         $b = Support::jsonBody();
         $this->auth->verifyDeleteCode($b['deleteCode'] ?? null);
-        $this->maintenance->resetToDemo();
-        $this->audit->log('data.reset', 'Alles zurückgesetzt (Demo-Daten)');
+        $this->maintenance->resetAll();
+        $this->audit->log('data.reset', 'Alles zurückgesetzt');
+        return ['ok' => true];
+    }
+
+    private function seedDemo(): array
+    {
+        if ($this->maintenance->counts()['products'] > 0) {
+            throw new ApiException(409, 'Demo-Daten können nur eingespielt werden, wenn noch keine Artikel vorhanden sind.');
+        }
+        $this->maintenance->seedDemo();
+        $this->audit->log('data.demo', 'Demo-Daten eingespielt');
         return ['ok' => true];
     }
 }

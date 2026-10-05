@@ -1140,7 +1140,15 @@ function renderSettingsTab() {
       <div class="data-summary">${counts ? `${counts.sales} Bons · ${counts.movements} Bewegungen · ${counts.products} Artikel gespeichert` : 'Lädt…'}</div>
       <div class="data-actions">
         <button data-action="clear-sales" class="btn-neutral">Verkäufe &amp; Journal löschen</button>
-        <button data-action="reset-all" class="btn-danger">Alles zurücksetzen (Demo neu)</button>
+        <button data-action="reset-all" class="btn-danger">Alles zurücksetzen</button>
+      </div>
+    </div>
+    <div class="card-box" style="padding:0;margin-top:12px">
+      <div class="data-summary">${counts && counts.products > 0
+        ? 'Demo-Daten: nur möglich, solange noch keine Artikel angelegt sind.'
+        : 'Demo-Daten: 15 Beispielartikel (Speisen, Getränke, Süßes) zum Ausprobieren einspielen.'}</div>
+      <div class="data-actions">
+        <button data-action="seed-demo" class="btn-neutral" ${counts && counts.products === 0 ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'}>Demo-Daten einspielen</button>
       </div>
     </div>
   </div>`;
@@ -1657,7 +1665,7 @@ function onAction(e) {
     });
     case 'reset-all': return openForm({
       kind: 'confirm', code: '', title: 'Alles zurücksetzen',
-      hint: 'Artikel, Verkäufe, Journal und Abschlüsse werden gelöscht und durch Demo-Daten ersetzt.',
+      hint: 'Artikel, Verkäufe, Journal und Abschlüsse werden unwiderruflich gelöscht. Einstellungen, Artikelgruppen und Benutzer bleiben.',
       submitLabel: 'Alles zurücksetzen',
       action: async (code) => {
         await api('/maintenance/reset', { method: 'POST', body: { deleteCode: code } });
@@ -1666,6 +1674,15 @@ function onAction(e) {
         renderHeader(); renderMain();
       },
     });
+    case 'seed-demo':
+      return guardedAdminCall(() => api('/maintenance/demo', { method: 'POST' }))
+        .then(async (res) => {
+          if (!res) return;
+          showToast('Demo-Daten eingespielt');
+          await Promise.all([loadBootstrap(), loadMaintenanceCounts()]);
+          renderHeader(); renderMain();
+        })
+        .catch((e) => showToast(e.message));
   }
 }
 

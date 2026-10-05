@@ -44,7 +44,10 @@ bin/        setup.php (CLI setup)
      further visit to Verwaltung requires the PIN like normal. **Do this immediately after your
      first deploy** — until you set a code, Verwaltung is open to anyone who finds the URL.
    Add `--demo` to the CLI form on first setup if you want the same 15 demo articles as the
-   prototype to start from; omit it if you're entering your own articles from scratch.
+   prototype to start from; omit it if you're entering your own articles from scratch. The same
+   set can be loaded later via Einstellungen → "Demo-Daten einspielen" (`POST /api/maintenance/demo`,
+   only while the article list is empty). "Alles zurücksetzen" wipes articles, sales, journal and
+   Z-reports and does **not** reseed demo data.
 5. Enforce HTTPS at the webserver level (the access cookie is `HttpOnly`/`SameSite=Strict`, but
    only gets `Secure` when `APP_HTTPS=1`).
 
