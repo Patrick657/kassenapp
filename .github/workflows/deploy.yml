@@ -38,4 +38,5 @@ jobs:
             design/**
             .env
             .env.example
+            config/config.local.php
             README.md

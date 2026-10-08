@@ -29,6 +29,11 @@ bin/        setup.php (CLI setup)
 2. Copy `.env.example` to `.env` next to `config/config.php` (i.e. `app/.env`) and fill in your
    real DB credentials. Set `APP_HTTPS=1` once you're serving over HTTPS (this makes the access
    cookie `Secure`) — do this before going live, not after.
+   **Alternative for hosts where a dotfile is awkward**: copy `config/config.local.example.php` to
+   `config/config.local.php` and enter the same keys there (it wins over `.env`). Either way,
+   **never put server settings into `config/config.php` itself** — that file is part of the app
+   and is replaced by every deploy. `.env` and `config/config.local.php` are in neither git nor
+   the FTP deploy, so they survive every update.
 3. Create the database and run the schema:
    ```
    mysql -u youruser -p yourdb < migrations/001_schema.sql

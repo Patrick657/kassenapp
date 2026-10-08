@@ -7,6 +7,18 @@ require_once __DIR__ . '/../src/Env.php';
 
 Env::load(__DIR__ . '/../.env');
 
+// Server-specific settings live in config.local.php (or .env) — never in this file. This file is
+// part of the app and gets replaced by every deploy; config.local.php is neither in git nor
+// touched by the deploy, so whatever is entered there survives every update.
+// Template: config.local.example.php.
+$localConfig = __DIR__ . '/config.local.php';
+if (is_file($localConfig)) {
+    $local = require $localConfig;
+    if (is_array($local)) {
+        Env::override($local);
+    }
+}
+
 date_default_timezone_set(Env::get('APP_TIMEZONE', 'Europe/Berlin'));
 
 return [
