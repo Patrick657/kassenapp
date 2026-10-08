@@ -26,7 +26,7 @@ final class ProductRepo
                 LEFT JOIN (
                     SELECT si.product_id, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS revenue_cents
                     FROM sale_items si
-                    JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL
+                    JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'
                     GROUP BY si.product_id
                 ) sq ON sq.product_id = p.id
                 WHERE p.archived_at IS NULL

@@ -11,20 +11,28 @@ final class ReportsRepo
     {
     }
 
+    /**
+     * What a checkout actually brought in: its total minus any Pfand paid back out in the same
+     * checkout (a return-only checkout is a sales row with total 0, so it comes out negative).
+     * Every Umsatz figure sums this, so returned Pfand leaves the Umsatz again instead of staying
+     * in it forever. Both columns are UNSIGNED — without the casts MySQL errors on a negative result.
+     */
+    public const NET_CENTS = 'CAST(total_cents AS SIGNED) - CAST(deposit_returned_cents AS SIGNED)';
+
     public function kpis(bool $trackStock): array
     {
         $today = $this->db->query(
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS sum_cents
-             FROM sales WHERE voided_at IS NULL AND DATE(sold_at) = CURDATE()"
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(" . self::NET_CENTS . "), 0) AS sum_cents
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND DATE(sold_at) = CURDATE()"
         )->fetch();
 
         $total = $this->db->query(
-            'SELECT COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS sum_cents FROM sales WHERE voided_at IS NULL'
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(" . self::NET_CENTS . "), 0) AS sum_cents FROM sales WHERE voided_at IS NULL AND payment <> 'comp'"
         )->fetch();
 
         $profit = $this->db->query(
             "SELECT COALESCE(SUM(si.qty * (si.unit_cents - si.cost_cents)), 0)
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL"
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'"
         )->fetchColumn();
 
         $lowStockCount = 0;
@@ -57,8 +65,8 @@ final class ReportsRepo
     public function daily(): array
     {
         $rows = $this->db->query(
-            "SELECT DATE(sold_at) AS d, SUM(total_cents) AS sum_cents
-             FROM sales WHERE voided_at IS NULL AND sold_at >= (CURDATE() - INTERVAL 6 DAY)
+            "SELECT DATE(sold_at) AS d, SUM(" . self::NET_CENTS . ") AS sum_cents
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND sold_at >= (CURDATE() - INTERVAL 6 DAY)
              GROUP BY DATE(sold_at)"
         )->fetchAll();
         $byDate = [];
@@ -80,8 +88,8 @@ final class ReportsRepo
     public function hourly(): array
     {
         $rows = $this->db->query(
-            "SELECT HOUR(sold_at) AS h, SUM(total_cents) AS sum_cents
-             FROM sales WHERE voided_at IS NULL AND HOUR(sold_at) BETWEEN 9 AND 23
+            "SELECT HOUR(sold_at) AS h, SUM(" . self::NET_CENTS . ") AS sum_cents
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND HOUR(sold_at) BETWEEN 9 AND 23
              GROUP BY HOUR(sold_at)"
         )->fetchAll();
         $byHour = [];
@@ -99,7 +107,7 @@ final class ReportsRepo
     {
         $stmt = $this->db->prepare(
             "SELECT si.product_id, MAX(si.name) AS name, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS revenue_cents
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'
              GROUP BY si.product_id
              ORDER BY revenue_cents DESC
              LIMIT " . max(1, $limit)
@@ -116,13 +124,18 @@ final class ReportsRepo
     public function payments(): array
     {
         $rows = $this->db->query(
-            "SELECT payment, COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS sum_cents
-             FROM sales WHERE voided_at IS NULL GROUP BY payment"
+            "SELECT payment, COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS sum_cents,
+                    COALESCE(SUM(deposit_returned_cents), 0) AS returned_cents
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' GROUP BY payment"
         )->fetchAll();
         $out = ['cash' => ['sumCents' => 0, 'count' => 0], 'card' => ['sumCents' => 0, 'count' => 0]];
+        $returned = 0;
         foreach ($rows as $r) {
             $out[$r['payment']] = ['sumCents' => (int) $r['sum_cents'], 'count' => (int) $r['cnt']];
+            $returned += (int) $r['returned_cents'];
         }
+        // Returned Pfand is always paid out in cash, even when the same checkout was paid by card.
+        $out['cash']['sumCents'] -= $returned;
         $totalCount = $out['cash']['count'] + $out['card']['count'];
         $totalSum = $out['cash']['sumCents'] + $out['card']['sumCents'];
         $out['avgTicketCents'] = $totalCount > 0 ? (int) round($totalSum / $totalCount) : 0;
@@ -133,7 +146,7 @@ final class ReportsRepo
     {
         $soldRows = $this->db->query(
             "SELECT si.product_id, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS revenue_cents
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'
              GROUP BY si.product_id"
         )->fetchAll();
         $sold = [];
@@ -197,6 +210,45 @@ final class ReportsRepo
         }
         unset($g);
         return $groups;
+    }
+
+    /**
+     * "Ohne Berechnung" bookings per Bereich: how many, what the goods would have cost (selling
+     * price) and what they actually cost (Einkauf), plus the articles behind it. Grouped by the
+     * name frozen on the booking, so a Bereich deleted since still shows up with its history.
+     * These rows are excluded from every revenue figure above — this is the one place they count.
+     */
+    public function comp(): array
+    {
+        $totals = $this->db->query(
+            "SELECT s.comp_name, COUNT(*) AS cnt, COALESCE(SUM(s.total_cents), 0) AS value_cents
+             FROM sales s WHERE s.voided_at IS NULL AND s.payment = 'comp'
+             GROUP BY s.comp_name ORDER BY value_cents DESC"
+        )->fetchAll();
+        $itemRows = $this->db->query(
+            "SELECT s.comp_name, si.name, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS value_cents,
+                    SUM(si.qty * si.cost_cents) AS cost_cents
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment = 'comp'
+             GROUP BY s.comp_name, si.name ORDER BY value_cents DESC"
+        )->fetchAll();
+        $items = [];
+        $cost = [];
+        foreach ($itemRows as $r) {
+            $key = (string) $r['comp_name'];
+            $items[$key][] = ['name' => $r['name'], 'qty' => (int) $r['qty'], 'valueCents' => (int) $r['value_cents']];
+            $cost[$key] = ($cost[$key] ?? 0) + (int) $r['cost_cents'];
+        }
+        return array_map(static function ($t) use ($items, $cost) {
+            $key = (string) $t['comp_name'];
+            return [
+                'name' => $key !== '' ? $key : 'Ohne Bereich',
+                'count' => (int) $t['cnt'],
+                'valueCents' => (int) $t['value_cents'],
+                'costCents' => $cost[$key] ?? 0,
+                'qty' => array_sum(array_column($items[$key] ?? [], 'qty')),
+                'items' => $items[$key] ?? [],
+            ];
+        }, $totals);
     }
 
     private static function weekdayShort(int $isoDayOfWeek): string

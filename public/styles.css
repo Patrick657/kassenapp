@@ -161,8 +161,14 @@ a { color: var(--accent); }
 .total-row .value.negative { color: var(--warn-text); }
 .payout-hint { text-align: center; font-size: 12px; font-weight: 600; color: var(--text-3); padding: 4px 0 2px; }
 .pay-switch { display: flex; gap: 6px; background: var(--fill); padding: 3px; border-radius: 11px; }
-.pay-switch button { flex: 1; padding: 11px; border-radius: 9px; font-size: 13.5px; font-weight: 700; color: rgba(0,0,0,.5); }
+.pay-switch button { flex: 1; padding: 11px 6px; white-space: nowrap; border-radius: 9px; font-size: 13.5px; font-weight: 700; color: rgba(0,0,0,.5); }
 .pay-switch button.active { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.14); color: var(--ink); }
+.comp-box { background: var(--info-fill); border-radius: 11px; padding: 10px 11px; }
+.comp-box-label { font-size: 12px; font-weight: 700; color: var(--info-text); margin-bottom: 7px; }
+.comp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.comp-chip { padding: 11px 14px; border-radius: 9px; font-size: 13.5px; font-weight: 700; background: #fff; color: var(--ink); }
+.comp-chip.active { background: var(--ink); color: #fff; }
+.comp-box-hint { font-size: 11.5px; color: var(--info-text); margin-top: 7px; }
 .notes-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .notes-grid button { padding: 12px 2px; border-radius: 10px; background: var(--ink); color: #fff; font-size: 13px; font-weight: 600; }
 .notes-grid button:active { transform: scale(.95); }

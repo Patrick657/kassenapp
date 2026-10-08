@@ -20,7 +20,9 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 10;
+    private const LATEST_VERSION = 11;
+
+    private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp')";
 
     public function __construct(private readonly PDO $db)
     {
@@ -85,6 +87,14 @@ final class Migrator
                 $this->setVersion(10);
             } catch (\Throwable $e) {
                 error_log('[Festkasse Migrator] v10 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 11) {
+            try {
+                $this->migrateToV11();
+                $this->setVersion(11);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v11 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
             }
         }
     }
@@ -162,10 +172,11 @@ final class Migrator
             'deposit_cents',
             'ALTER TABLE sales ADD COLUMN deposit_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER discount_cents'
         );
-        // Re-declaring the same enum is a harmless no-op if this ever ran already; the version
-        // gate in ensureUpToDate() means it normally only executes once anyway.
+        // This step runs on every request (see ensureUpToDate()), so the enum declared here must
+        // always be the full, current list — including values added by later steps ('comp' from
+        // migrateToV11()). Declaring the shorter original list would strip them again each time.
         $this->db->exec(
-            "ALTER TABLE cash_movements MODIFY COLUMN type ENUM('sale','in','out','close','delivery','deposit_return') NOT NULL"
+            "ALTER TABLE cash_movements MODIFY COLUMN type " . self::CASH_MOVEMENT_TYPE_ENUM . " NOT NULL"
         );
     }
 
@@ -270,6 +281,40 @@ final class Migrator
             'cash_movements',
             'fk_cash_movements_deposit_type',
             'ALTER TABLE cash_movements ADD CONSTRAINT fk_cash_movements_deposit_type FOREIGN KEY (deposit_type_id) REFERENCES deposit_types(id) ON DELETE SET NULL'
+        );
+    }
+
+    /**
+     * "Ohne Berechnung": goods handed out without payment (e.g. the band's drinks are on the
+     * house) still get recorded — stock, quantities and their value — but must never count as
+     * revenue or touch the drawer. Such a checkout is a normal sales row with payment = 'comp',
+     * booked onto one of a few freely managed Bereiche (comp_accounts: "Band", "Helfer", ...).
+     * sales.comp_name freezes the Bereich's name at booking time, same idea as sale_items.name —
+     * renaming or deleting a Bereich later must not rewrite what past bookings say.
+     */
+    private function migrateToV11(): void
+    {
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS comp_accounts (
+                id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name       VARCHAR(60) NOT NULL,
+                sort_order INT         NOT NULL DEFAULT 0,
+                created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $this->ensureColumn(
+            'sales',
+            'comp_account_id',
+            'ALTER TABLE sales ADD COLUMN comp_account_id INT UNSIGNED NULL AFTER payment'
+        );
+        $this->ensureColumn(
+            'sales',
+            'comp_name',
+            'ALTER TABLE sales ADD COLUMN comp_name VARCHAR(60) NULL AFTER comp_account_id'
+        );
+        $this->db->exec("ALTER TABLE sales MODIFY COLUMN payment ENUM('cash','card','comp') NOT NULL");
+        $this->db->exec(
+            "ALTER TABLE cash_movements MODIFY COLUMN type " . self::CASH_MOVEMENT_TYPE_ENUM . " NOT NULL"
         );
     }
 

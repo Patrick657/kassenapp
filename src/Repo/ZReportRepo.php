@@ -56,8 +56,8 @@ final class ZReportRepo
         if (!$z) {
             return [];
         }
-        $sql = "SELECT receipt_no, sold_at, total_cents, payment FROM sales
-                WHERE voided_at IS NULL AND sold_at <= ?" . ($z['from_sale_at'] !== null ? ' AND sold_at > ?' : '')
+        $sql = "SELECT receipt_no, sold_at, " . ReportsRepo::NET_CENTS . " AS total_cents, payment FROM sales
+                WHERE voided_at IS NULL AND payment <> 'comp' AND sold_at <= ?" . ($z['from_sale_at'] !== null ? ' AND sold_at > ?' : '')
             . ' ORDER BY sold_at ASC';
         $params = $z['from_sale_at'] !== null ? [$z['closed_at'], $z['from_sale_at']] : [$z['closed_at']];
         $stmt = $this->db->prepare($sql);
@@ -70,14 +70,39 @@ final class ZReportRepo
         ], $stmt->fetchAll());
     }
 
+    /**
+     * "Ohne Berechnung" bookings inside one closed Z-Bericht's period, summed per Bereich — shown
+     * on its PDF for information only; they are in none of the report's Bar/Karte/Umsatz totals.
+     */
+    public function compFor(int $no): array
+    {
+        $stmt = $this->db->prepare('SELECT from_sale_at, closed_at FROM z_reports WHERE no = ?');
+        $stmt->execute([$no]);
+        $z = $stmt->fetch();
+        if (!$z) {
+            return [];
+        }
+        $sql = "SELECT comp_name, COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS value_cents FROM sales
+                WHERE voided_at IS NULL AND payment = 'comp' AND sold_at <= ?" . ($z['from_sale_at'] !== null ? ' AND sold_at > ?' : '')
+            . ' GROUP BY comp_name ORDER BY value_cents DESC';
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($z['from_sale_at'] !== null ? [$z['closed_at'], $z['from_sale_at']] : [$z['closed_at']]);
+        return array_map(static fn ($r) => [
+            'name' => (string) ($r['comp_name'] ?? '') !== '' ? $r['comp_name'] : 'Ohne Bereich',
+            'count' => (int) $r['cnt'],
+            'valueCents' => (int) $r['value_cents'],
+        ], $stmt->fetchAll());
+    }
+
     public function close(): array
     {
         $lastCloseAt = $this->cash->lastCloseOccurredAt();
         $sql = "SELECT COUNT(*) AS cnt,
                        COALESCE(SUM(CASE WHEN payment = 'cash' THEN total_cents ELSE 0 END), 0) AS cash_cents,
-                       COALESCE(SUM(CASE WHEN payment = 'card' THEN total_cents ELSE 0 END), 0) AS card_cents
+                       COALESCE(SUM(CASE WHEN payment = 'card' THEN total_cents ELSE 0 END), 0) AS card_cents,
+                       COALESCE(SUM(deposit_returned_cents), 0) AS returned_cents
                 FROM sales
-                WHERE voided_at IS NULL" . ($lastCloseAt !== null ? ' AND sold_at > ?' : '');
+                WHERE voided_at IS NULL AND payment <> 'comp'" . ($lastCloseAt !== null ? ' AND sold_at > ?' : '');
         $stmt = $this->db->prepare($sql);
         $stmt->execute($lastCloseAt !== null ? [$lastCloseAt] : []);
         $row = $stmt->fetch();
@@ -85,6 +110,11 @@ final class ZReportRepo
         if ((int) $row['cnt'] === 0) {
             throw new ApiException(400, 'Seit dem letzten Abschluss keine Verkäufe');
         }
+
+        // Returned Pfand leaves the Umsatz again — always out of the cash side, since a Rückgabe is
+        // paid out in cash even when the same checkout was paid by card. Clamped at 0: the
+        // z_reports columns are UNSIGNED.
+        $row['cash_cents'] = max(0, (int) $row['cash_cents'] - (int) $row['returned_cents']);
 
         $balance = $this->cash->balanceCents();
         $no = (int) ($this->db->query('SELECT COALESCE(MAX(no), 0) FROM z_reports')->fetchColumn()) + 1;

@@ -6,6 +6,7 @@ namespace Festkasse;
 use Festkasse\Repo\AuditRepo;
 use Festkasse\Repo\CashRepo;
 use Festkasse\Repo\CategoryRepo;
+use Festkasse\Repo\CompAccountRepo;
 use Festkasse\Repo\DepositTypeRepo;
 use Festkasse\Repo\JournalRepo;
 use Festkasse\Repo\MaintenanceRepo;
@@ -24,6 +25,7 @@ final class Api
     private ProductRepo $products;
     private CategoryRepo $categories;
     private DepositTypeRepo $depositTypes;
+    private CompAccountRepo $compAccounts;
     private CashRepo $cash;
     private SaleRepo $sales;
     private ZReportRepo $zReports;
@@ -42,6 +44,7 @@ final class Api
         $this->products = new ProductRepo($db);
         $this->categories = new CategoryRepo($db);
         $this->depositTypes = new DepositTypeRepo($db);
+        $this->compAccounts = new CompAccountRepo($db);
         $this->cash = new CashRepo($db);
         $this->sales = new SaleRepo($db, $this->products, $this->cash);
         $this->zReports = new ZReportRepo($db, $this->cash);
@@ -256,6 +259,32 @@ final class Api
             }
         }
 
+        if ($path === '/api/comp-accounts') {
+            $this->auth->requireAccess();
+            if ($method === 'GET') {
+                return $this->compAccounts->list();
+            }
+            if ($method === 'POST') {
+                $b = Support::jsonBody();
+                $id = $this->compAccounts->create((string) ($b['name'] ?? ''));
+                return ['id' => $id];
+            }
+        }
+
+        if (preg_match('#^/api/comp-accounts/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            $this->auth->requireAccess();
+            if ($method === 'PATCH') {
+                $b = Support::jsonBody();
+                $this->compAccounts->rename($id, (string) ($b['name'] ?? ''));
+                return ['ok' => true];
+            }
+            if ($method === 'DELETE') {
+                $this->compAccounts->delete($id);
+                return ['ok' => true];
+            }
+        }
+
         if ($method === 'POST' && $path === '/api/products') {
             $this->auth->requireAccess();
             return $this->createProduct();
@@ -312,7 +341,7 @@ final class Api
             return $this->maintenance->counts();
         }
 
-        if ($method === 'GET' && preg_match('#^/api/reports/(kpis|daily|hourly|products|payments|groups)$#', $path, $m)) {
+        if ($method === 'GET' && preg_match('#^/api/reports/(kpis|daily|hourly|products|payments|groups|comp)$#', $path, $m)) {
             $this->auth->requireAccess();
             return $this->report($m[1]);
         }
@@ -388,7 +417,7 @@ final class Api
         ], $active);
 
         $today = (int) $this->db->query(
-            "SELECT COALESCE(SUM(total_cents), 0) FROM sales WHERE voided_at IS NULL AND DATE(sold_at) = CURDATE()"
+"SELECT COALESCE(SUM(" . ReportsRepo::NET_CENTS . "), 0) FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND DATE(sold_at) = CURDATE()"
         )->fetchColumn();
 
         return [
@@ -396,6 +425,11 @@ final class Api
             'settings' => $settings,
             'products' => $products,
             'depositTypes' => $this->depositTypes->list(),
+            // Bereiche for "ohne Berechnung" bookings — names only, the POS needs nothing else.
+            'compAccounts' => array_map(
+                static fn ($c) => ['id' => $c['id'], 'name' => $c['name']],
+                $this->compAccounts->list()
+            ),
             'cashBalanceCents' => $this->cash->balanceCents(),
             'todayRevenueCents' => $today,
             'access' => $this->auth->status(),
@@ -745,15 +779,27 @@ final class Api
             $returnLines[] = ['depositType' => $depositType, 'qty' => (int) ($r['qty'] ?? 0)];
         }
 
+        // "Ohne Berechnung": the Bereich is resolved here, never trusted from the client beyond
+        // its id — same as Pfand-Optionen above.
+        $payment = (string) ($b['payment'] ?? 'cash');
+        $compAccount = null;
+        if ($payment === 'comp') {
+            $compAccount = $this->compAccounts->find((int) ($b['compAccountId'] ?? 0));
+            if ($compAccount === null) {
+                throw new ApiException(400, 'Bitte einen Bereich für die Buchung ohne Berechnung wählen');
+            }
+        }
+
         $trackStock = $this->settings->bool('track_stock', true);
         return $this->sales->create(
             $items,
             (int) ($b['discountCents'] ?? 0),
-            (string) ($b['payment'] ?? 'cash'),
+            $payment,
             (int) ($b['givenCents'] ?? 0),
             $trackStock,
             $clientUuid,
-            $returnLines
+            $returnLines,
+            $compAccount
         );
     }
 
@@ -766,6 +812,7 @@ final class Api
             'products' => $this->reports->productsRanking(7),
             'payments' => $this->reports->payments(),
             'groups' => $this->reports->groups($this->settings->bool('track_stock', true)),
+            'comp' => $this->reports->comp(),
             default => throw new ApiException(404, 'Unbekannter Report'),
         };
     }
@@ -783,6 +830,7 @@ final class Api
     private const JOURNAL_TAG_TEXT = [
         'sale' => 'Verkauf', 'in' => 'Einlage', 'out' => 'Entnahme',
         'close' => 'Z-Abschluss', 'delivery' => 'Warenzugang', 'deposit_return' => 'Pfand zurück',
+        'comp' => 'Ohne Berechnung',
     ];
 
     private function emailJournal(): array
@@ -808,6 +856,9 @@ final class Api
         foreach ($rows as $r) {
             $when = (new \DateTime($r['occurredAt']))->format('d.m.Y H:i');
             $type = self::JOURNAL_TAG_TEXT[$r['type']] ?? $r['type'];
+            if ($r['type'] === 'comp' && !empty($r['compName'])) {
+                $type .= ' (' . $r['compName'] . ')';
+            }
             $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
             $color = $r['type'] === 'delivery' ? null : ($r['amountCents'] > 0 ? Pdf::GREEN : ($r['amountCents'] < 0 ? Pdf::RED : null));
 
@@ -893,6 +944,22 @@ final class Api
             );
         }
 
+        $comp = $this->reports->comp();
+        if (!empty($comp)) {
+            $pdf->addSpacer();
+            $pdf->addLine('Ohne Berechnung (nicht im Umsatz enthalten)', true);
+            $pdf->addLine(Support::padDisplay('Bereich', 30) . Support::padDisplayRight('Buchungen', 11) . Support::padDisplayRight('Warenwert VK', 16) . Support::padDisplayRight('Wareneinsatz EK', 18));
+            foreach ($comp as $c) {
+                $pdf->addLine(
+                    Support::padDisplay($c['name'], 30) . Support::padDisplayRight((string) $c['count'], 11)
+                    . Support::padDisplayRight(Support::eur($c['valueCents']), 16) . Support::padDisplayRight(Support::eur($c['costCents']), 18)
+                );
+                foreach ($c['items'] as $item) {
+                    $pdf->addLine('  ' . Support::padDisplay($item['qty'] . '× ' . $item['name'], 39) . Support::padDisplayRight(Support::eur($item['valueCents']), 16));
+                }
+            }
+        }
+
         $filename = 'Auswertungen-' . date('Y-m-d') . '.pdf';
         $this->mailer->send(
             $to,
@@ -949,6 +1016,15 @@ final class Api
         }
         if (empty($sales)) {
             $pdf->addLine('Keine Verkäufe in diesem Zeitraum.');
+        }
+
+        $comp = $this->zReports->compFor($z['no']);
+        if (!empty($comp)) {
+            $pdf->addSpacer();
+            $pdf->addLine('Ohne Berechnung (nicht im Umsatz enthalten)', true);
+            foreach ($comp as $c) {
+                $pdf->addSplitLine($c['name'] . ' · ' . $c['count'] . ' Buchung(en)', 'Warenwert ' . Support::eur($c['valueCents']));
+            }
         }
 
         $filename = 'Z-Bericht-' . $z['no'] . '.pdf';

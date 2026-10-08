@@ -281,11 +281,43 @@ must keep showing what was actually charged even if the option's price changes l
   findOrCreateByAmount()` reuses an existing option with that exact amount or creates a generically
   named one, then links the article to it; on export, the resolved `deposit_cents` is printed as
   before.
-- **Umsatz-Reports unverändert**: `ReportsRepo`'s Umsatz/Auswertungen figures and the Z-Bon's
-  Bar/Karte totals intentionally keep using the full `total_cents` (goods + Pfand), matching what
-  actually moves through the drawer — Pfand isn't subtracted out of "Umsatz" anywhere. If you want
-  Pfand reported as a separate line from real sales revenue later, `sales.deposit_cents` /
-  `sale_items.deposit_cents` are already there to build that on top of.
+- **Pfand im Umsatz**: charged Pfand is part of `total_cents` and therefore of the Umsatz when it
+  is collected; when it is paid back, it leaves the Umsatz again. Every Umsatz figure (header
+  "Umsatz heute", `ReportsRepo` KPIs/daily/hourly/payments, the Z-Bon's totals and its PDF listing)
+  sums `ReportsRepo::NET_CENTS` = `total_cents − deposit_returned_cents`, so a Krug that went out
+  and came back nets to zero and the Umsatz matches what is actually in the drawer. The payout
+  always reduces the **Bar** side, even if the same checkout was paid by card. Per-article and
+  per-group revenue never contained Pfand (they sum `unit_cents`) and are unaffected.
+
+## Ohne Berechnung (Ware erfassen, die nicht bezahlt wird)
+
+Added at the operator's request: on some evenings part of what goes over the counter is on the
+house (the band's drinks, helpers, guests of honour). That consumption should still be recorded —
+quantities, stock, what it was worth — but must never show up as revenue or as money in the drawer.
+
+- **Verwaltung → Ohne Berechnung** manages the Bereiche (`comp_accounts`, migration v11): just a
+  name ("Band", "Helfer", ...), as many as needed. As soon as at least one exists, the POS shows a
+  third Zahlart **"Ohne Berechnung"** next to Bar/Karte; with none configured nothing changes.
+- **Booking**: same cart as any sale → "Ohne Berechnung" → pick the Bereich → "Ohne Berechnung
+  buchen". `SaleRepo::create()` stores a normal `sales` row with `payment = 'comp'`,
+  `comp_account_id` and `comp_name` (the Bereich's name frozen at booking time, so renaming or
+  deleting a Bereich never rewrites history). `total_cents` holds the goods value at selling price;
+  discount is ignored, **no Pfand is charged**, `given`/`change` are 0. Stock is deducted exactly
+  like a paid sale. The journal gets a `cash_movements` row of type `comp` with amount 0, so the
+  Vorgang is visible (and opens its Bon) without moving the Kassenbestand.
+- **A Pfand-Rückgabe can't be part of such a booking** (rejected server-side) — a payout is real
+  cash leaving the drawer and has to be its own checkout.
+- **Excluded from every revenue figure**: all `ReportsRepo` queries, the header's "Umsatz heute",
+  the Artikel tab's "Verkauft" column and the Z-Bericht's count/Bar/Karte totals filter on
+  `payment <> 'comp'`. When adding a new query over `sales`, add that filter too.
+- **Reported separately**: Auswertungen has its own "Ohne Berechnung" block per Bereich (bookings,
+  Warenwert at VK, Wareneinsatz at EK, articles) from `GET /api/reports/comp`; the same block is
+  appended to the Auswertungen PDF, and a Z-Bericht PDF lists the period's Warenwert per Bereich
+  (`ZReportRepo::compFor()`), clearly marked as not part of the Umsatz.
+- After a booking the POS switches back to Bar and clears the chosen Bereich, so the next customer
+  can't be booked free by accident.
+- `Migrator::migrateToV6()` runs on every request and re-declares the `cash_movements.type` enum —
+  it and v11 share `CASH_MOVEMENT_TYPE_ENUM` for that reason. Add future enum values there.
 
 ## Reports per email (Journal, Auswertungen, Z-Bericht)
 

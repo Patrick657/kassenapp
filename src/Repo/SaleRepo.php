@@ -31,14 +31,32 @@ final class SaleRepo
      * @param array<int, array{productId:?int, name:string, unitCents:int, qty:int}> $items
      * @param array<int, array{depositType:array, qty:int}> $returnLines resolved Pfand-Option rows
      *        (id/name/amount_cents) + qty, already validated to exist by the caller
+     * @param ?array $compAccount resolved comp_accounts row — required for (and only used with)
+     *        payment 'comp', an "ohne Berechnung" booking: the goods are recorded with their
+     *        normal value and leave stock, but nothing is collected, no Pfand is charged and the
+     *        drawer isn't touched. Every revenue figure excludes these rows (payment <> 'comp').
      */
-    public function create(array $items, int $discountCents, string $payment, int $givenCents, bool $trackStock, ?string $clientUuid, array $returnLines = []): array
+    public function create(array $items, int $discountCents, string $payment, int $givenCents, bool $trackStock, ?string $clientUuid, array $returnLines = [], ?array $compAccount = null): array
     {
         if (empty($items) && empty($returnLines)) {
             throw new ApiException(400, 'Warenkorb ist leer');
         }
-        if (!in_array($payment, ['cash', 'card'], true)) {
+        if (!in_array($payment, ['cash', 'card', 'comp'], true)) {
             throw new ApiException(400, 'Ungültige Zahlart');
+        }
+        $isComp = $payment === 'comp';
+        if ($isComp) {
+            if ($compAccount === null) {
+                throw new ApiException(400, 'Bitte einen Bereich für die Buchung ohne Berechnung wählen');
+            }
+            if (empty($items)) {
+                throw new ApiException(400, 'Warenkorb ist leer');
+            }
+            // A Pfand payout is real cash leaving the drawer — it can't ride along on a booking
+            // whose whole point is that no money moves.
+            if (!empty($returnLines)) {
+                throw new ApiException(400, 'Pfand-Rückgabe bitte separat buchen, nicht zusammen mit „Ohne Berechnung“');
+            }
         }
         foreach ($returnLines as $r) {
             if ((int) $r['qty'] <= 0) {
@@ -68,7 +86,7 @@ final class SaleRepo
                 $product = $this->products->find($productId);
                 if ($product !== null) {
                     $costCents = (int) $product['cost_cents'];
-                    $depositCents = (int) $product['deposit_cents'];
+                    $depositCents = $isComp ? 0 : (int) $product['deposit_cents'];
                     $name = $name !== '' ? $name : (string) $product['name'];
                     $productTracksStock = (bool) $product['track_stock'];
                 }
@@ -79,14 +97,18 @@ final class SaleRepo
         }
 
         // Pfand is never discountable — it's a refundable liability, not part of the goods price.
-        $discount = max(0, min($discountCents, $subtotal));
+        $discount = $isComp ? 0 : max(0, min($discountCents, $subtotal));
         $grossTotal = $subtotal - $discount + $depositTotal;
 
         // A same-checkout Pfand-Rückgabe only offsets what the customer hands over when paying
         // cash — a card charge still needs the full gross amount, since a card payment and a cash
         // refund are two different tenders that can't net against each other. That's also the only
         // way "net" can go negative: a card sale's given/change stay exactly as before, unaffected.
-        if ($payment === 'cash') {
+        if ($isComp) {
+            // total_cents keeps the goods value (what it would have cost) for the Auswertung.
+            $given = 0;
+            $change = 0;
+        } elseif ($payment === 'cash') {
             $net = $grossTotal - $returnedCents;
             if ($net > 0) {
                 if ($givenCents < $net) {
@@ -109,12 +131,12 @@ final class SaleRepo
         $this->db->beginTransaction();
         try {
             $stmt = $this->db->prepare(
-                'INSERT INTO sales (client_uuid, receipt_no, sold_at, subtotal_cents, discount_cents, deposit_cents, deposit_returned_cents, total_cents, payment, given_cents, change_cents)
-                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO sales (client_uuid, receipt_no, sold_at, subtotal_cents, discount_cents, deposit_cents, deposit_returned_cents, total_cents, payment, comp_account_id, comp_name, given_cents, change_cents)
+                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             // receipt_no is finalized below once we have the id; store a temporary unique placeholder first.
             $placeholder = 'TMP-' . bin2hex(random_bytes(8));
-            $stmt->execute([$clientUuid, $placeholder, $subtotal, $discount, $depositTotal, $returnedCents, $grossTotal, $payment, $given, $change]);
+            $stmt->execute([$clientUuid, $placeholder, $subtotal, $discount, $depositTotal, $returnedCents, $grossTotal, $payment, $isComp ? (int) $compAccount['id'] : null, $isComp ? (string) $compAccount['name'] : null, $given, $change]);
             $saleId = (int) $this->db->lastInsertId();
             $receiptNo = Support::receiptNo($saleId);
             $this->db->prepare('UPDATE sales SET receipt_no = ? WHERE id = ?')->execute([$receiptNo, $saleId]);
@@ -129,8 +151,13 @@ final class SaleRepo
                         $this->products->deductStock($r['productId'], $r['qty']);
                     }
                 }
-                $note = count($resolved) . ' Position(en) · ' . ($payment === 'cash' ? 'Bar' : 'Karte');
-                $this->cash->insert('sale', $payment === 'cash' ? $grossTotal : 0, $note, $saleId);
+                if ($isComp) {
+                    $note = count($resolved) . ' Position(en) · Ohne Berechnung · ' . $compAccount['name'];
+                    $this->cash->insert('comp', 0, $note, $saleId);
+                } else {
+                    $note = count($resolved) . ' Position(en) · ' . ($payment === 'cash' ? 'Bar' : 'Karte');
+                    $this->cash->insert('sale', $payment === 'cash' ? $grossTotal : 0, $note, $saleId);
+                }
             }
 
             foreach ($returnLines as $r) {
@@ -194,6 +221,7 @@ final class SaleRepo
             'totalCents' => (int) $sale['total_cents'],
             'netCents' => (int) $sale['total_cents'] - (int) $sale['deposit_returned_cents'],
             'payment' => $sale['payment'],
+            'compName' => $sale['comp_name'] ?? null,
             'givenCents' => (int) $sale['given_cents'],
             'changeCents' => (int) $sale['change_cents'],
         ];

@@ -63,7 +63,7 @@ final class JournalRepo
      */
     public function exportRows(int $limit = 5000): array
     {
-        $sql = 'SELECT m.*, s.receipt_no, dt.name AS deposit_type_name
+        $sql = 'SELECT m.*, s.receipt_no, s.comp_name, dt.name AS deposit_type_name
                 FROM cash_movements m
                 LEFT JOIN sales s ON s.id = m.sale_id
                 LEFT JOIN deposit_types dt ON dt.id = m.deposit_type_id
@@ -71,13 +71,13 @@ final class JournalRepo
         $rows = $this->db->query($sql)->fetchAll();
 
         $saleIds = array_values(array_unique(array_filter(
-            array_map(static fn ($r) => $r['type'] === 'sale' && $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
+            array_map(static fn ($r) => in_array($r['type'], ['sale', 'comp'], true) && $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
         )));
         $itemLines = $this->itemLinesForSales($saleIds);
 
         return array_map(static function ($m) use ($itemLines) {
             $lines = match ($m['type']) {
-                'sale' => $itemLines[(int) $m['sale_id']] ?? [],
+                'sale', 'comp' => $itemLines[(int) $m['sale_id']] ?? [],
                 'deposit_return' => [[
                     'label' => $m['qty'] . '× ' . ($m['deposit_type_name'] ?? 'Pfand'),
                     'amountCents' => (int) $m['amount_cents'],
@@ -90,6 +90,7 @@ final class JournalRepo
                 'amountCents' => (int) $m['amount_cents'],
                 'note' => $m['note'],
                 'receiptNo' => $m['receipt_no'],
+                'compName' => $m['comp_name'],
                 'lines' => $lines,
             ];
         }, $rows);
