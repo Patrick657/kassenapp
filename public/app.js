@@ -320,8 +320,7 @@ async function submitForm() {
     if (f.kind === 'void') {
       const reason = (f.reason || '').trim();
       if (!reason) return setFormError('Bitte einen Grund angeben');
-      if (!(f.code || '').trim()) return setFormError('Löschkennwort fehlt');
-      const rc = await guardedAdminCall(() => api('/receipts/' + encodeURIComponent(f.receiptNo) + '/void', { method: 'POST', body: { reason, deleteCode: f.code } }));
+      const rc = await guardedAdminCall(() => api('/receipts/' + encodeURIComponent(f.receiptNo) + '/void', { method: 'POST', body: { reason } }));
       if (!rc) return;
       closeForm();
       showToast('Bon ' + f.receiptNo + ' storniert');
@@ -1363,7 +1362,6 @@ function renderFormOverlay() {
     title = 'Bon stornieren · ' + f.receiptNo;
     hint = 'Der Bon zählt danach nicht mehr zum Umsatz, der Bestand wird zurückgebucht und die Kasse per Gegenbuchung korrigiert. Der Bon bleibt im Journal sichtbar.';
     fields = `<div class="form-field"><label>Grund</label><textarea data-form-key="reason" rows="2" maxlength="255" placeholder="z. B. Falsch getippt, Kunde hat storniert">${esc(f.reason || '')}</textarea></div>`;
-    fields += F('Löschkennwort', 'code', '••••', 'password');
     submitLabel = 'Stornieren';
     dangerSubmit = true;
   } else if (f.kind === 'price') {
@@ -1579,7 +1577,7 @@ function onAction(e) {
     case 'checkout': return void checkout();
 
     case 'close-receipt': state.receipt = null; return renderOverlay();
-    case 'void-receipt': state.receipt = null; return openForm({ kind: 'void', receiptNo: d.no, reason: '', code: '' });
+    case 'void-receipt': state.receipt = null; return openForm({ kind: 'void', receiptNo: d.no, reason: '' });
     case 'close-form': return closeForm();
     case 'submit-form': return void submitForm();
     case 'pin-press': return void pinPress(d.key);

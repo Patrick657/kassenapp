@@ -327,8 +327,8 @@ quantities, stock, what it was worth — but must never show up as revenue or as
 ## Storno (Bon stornieren)
 
 - **Where**: Verwaltung → Journal → open a Bon → **"Bon stornieren"** (only shown in Verwaltung, never
-  on the POS receipt after checkout). A short reason is required, plus the Löschkennwort like every
-  other destructive action. Endpoint: `POST /api/receipts/{no}/void` with `{reason, deleteCode}`.
+  on the POS receipt after checkout). A short reason is required; being logged in to Verwaltung as admin
+  is enough, no Löschkennwort (operator's decision). Endpoint: `POST /api/receipts/{no}/void` with `{reason}`.
 - **Only Bons of the still-open day**: once a Bon is in a Z-Bericht it can't be voided anymore (409)
   — that report is closed/emailed and its cash already left the drawer.
 - **Nothing is deleted** (`SaleRepo::void()`, migration v12): the `sales` row gets `voided_at` +

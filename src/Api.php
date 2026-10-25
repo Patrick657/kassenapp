@@ -172,7 +172,6 @@ final class Api
         if ($method === 'POST' && preg_match('#^/api/receipts/([A-Za-z0-9\-]+)/void$#', $path, $m)) {
             $this->auth->requireAccess();
             $b = Support::jsonBody();
-            $this->auth->verifyDeleteCode($b['deleteCode'] ?? null);
             $receipt = $this->sales->void($m[1], (string) ($b['reason'] ?? ''), $this->settings->bool('track_stock', true));
             $this->audit->log('sale.void', 'Bon ' . $m[1] . ' storniert · ' . $receipt['voidReason']);
             return $receipt;
