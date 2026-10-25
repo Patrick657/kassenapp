@@ -338,6 +338,15 @@ quantities, stock, what it was worth — but must never show up as revenue or as
   articles is booked back. The Journal shows the original entries marked "storniert" plus the
   Storno row; the Bon itself shows date and reason. Each Storno is also written to `audit_log`.
 
+## Benutzer im Journal
+
+Every `cash_movements` row records who booked it (migration v13): `user_id` + `user_name` of the
+POS user logged in on that device (`Api::handle()` hands `Auth::posCurrentUser()` to
+`CashRepo::setActor()`, so every insert picks it up). The name is frozen at booking time, so
+renaming or deleting a user later doesn't change the journal. Shown as column "Benutzer" in
+Verwaltung → Journal and in the header line of each entry in the Journal-PDF. Entries from before
+v13, or booked while no users are set up, show "–".
+
 ## Reports per email (Journal, Auswertungen, Z-Bericht)
 
 "Per E-Mail senden" on the Journal tab, the Auswertungen tab, and each individual Z-Bericht in

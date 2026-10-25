@@ -44,6 +44,7 @@ final class JournalRepo
             'note' => $m['note'],
             'saleId' => $m['sale_id'] !== null ? (int) $m['sale_id'] : null,
             'receiptNo' => $m['receipt_no'],
+            'userName' => $m['user_name'],
             'saleVoided' => $m['voided_at'] !== null,
             'itemsSummary' => $m['sale_id'] !== null ? ($summaries[(int) $m['sale_id']] ?? null) : null,
         ], $rows);
@@ -92,6 +93,7 @@ final class JournalRepo
                 'note' => $m['note'],
                 'receiptNo' => $m['receipt_no'],
                 'compName' => $m['comp_name'],
+                'userName' => $m['user_name'],
                 'lines' => $lines,
             ];
         }, $rows);

@@ -64,6 +64,12 @@ final class Api
         }
 
         try {
+            // Who booked it, for the Journal. Best-effort: a lookup failure must never block a sale.
+            try {
+                $this->cash->setActor($this->auth->posCurrentUser());
+            } catch (\Throwable $e) {
+                error_log('[Festkasse API] Benutzer für Journal nicht ermittelbar: ' . $e->getMessage());
+            }
             $result = $this->route($method, $path);
             Support::sendJson($result ?? ['ok' => true]);
         } catch (ApiException $e) {
@@ -870,7 +876,8 @@ final class Api
             $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
             $color = $r['type'] === 'delivery' ? null : ($r['amountCents'] > 0 ? Pdf::GREEN : ($r['amountCents'] < 0 ? Pdf::RED : null));
 
-            $header = 'Nr. ' . ($r['receiptNo'] ?? '–') . '  ·  ' . $type . '  ·  ' . $when . ' Uhr';
+            $header = 'Nr. ' . ($r['receiptNo'] ?? '–') . '  ·  ' . $type . '  ·  ' . $when . ' Uhr'
+                . (!empty($r['userName']) ? '  ·  ' . $r['userName'] : '');
             $pdf->addSplitLine($header, $amount, bold: true, rightColor: $color);
 
             if (!empty($r['lines'])) {

@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 12;
+    private const LATEST_VERSION = 13;
 
     private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp','void')";
 
@@ -103,6 +103,14 @@ final class Migrator
                 $this->setVersion(12);
             } catch (\Throwable $e) {
                 error_log('[Festkasse Migrator] v12 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 13) {
+            try {
+                $this->migrateToV13();
+                $this->setVersion(13);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v13 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
             }
         }
     }
@@ -341,6 +349,25 @@ final class Migrator
         );
         $this->db->exec(
             "ALTER TABLE cash_movements MODIFY COLUMN type " . self::CASH_MOVEMENT_TYPE_ENUM . " NOT NULL"
+        );
+    }
+
+    /**
+     * Journal shows who booked each entry: the POS user logged in on that device at the time.
+     * user_name freezes the name (same idea as sale_items.name), so renaming or deleting a user
+     * later never rewrites the journal. No FK on user_id on purpose — users can be deleted.
+     */
+    private function migrateToV13(): void
+    {
+        $this->ensureColumn(
+            'cash_movements',
+            'user_id',
+            'ALTER TABLE cash_movements ADD COLUMN user_id INT UNSIGNED NULL AFTER deposit_type_id'
+        );
+        $this->ensureColumn(
+            'cash_movements',
+            'user_name',
+            'ALTER TABLE cash_movements ADD COLUMN user_name VARCHAR(60) NULL AFTER user_id'
         );
     }
 

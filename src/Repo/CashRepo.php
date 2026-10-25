@@ -7,8 +7,17 @@ use PDO;
 
 final class CashRepo
 {
+    /** POS user logged in on the requesting device, stamped onto every movement booked. */
+    private ?array $actor = null;
+
     public function __construct(private readonly PDO $db)
     {
+    }
+
+    /** @param ?array{id:int,name:string} $user */
+    public function setActor(?array $user): void
+    {
+        $this->actor = $user;
     }
 
     public function balanceCents(): int
@@ -19,10 +28,10 @@ final class CashRepo
     public function insert(string $type, int $amountCents, string $note, ?int $saleId = null, ?int $productId = null, ?int $qty = null, ?int $depositTypeId = null): int
     {
         $stmt = $this->db->prepare(
-            'INSERT INTO cash_movements (occurred_at, type, amount_cents, note, sale_id, product_id, qty, deposit_type_id)
-             VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO cash_movements (occurred_at, type, amount_cents, note, sale_id, product_id, qty, deposit_type_id, user_id, user_name)
+             VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$type, $amountCents, $note, $saleId, $productId, $qty, $depositTypeId]);
+        $stmt->execute([$type, $amountCents, $note, $saleId, $productId, $qty, $depositTypeId, $this->actor['id'] ?? null, $this->actor['name'] ?? null]);
         return (int) $this->db->lastInsertId();
     }
 
