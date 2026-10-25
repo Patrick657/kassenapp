@@ -324,6 +324,20 @@ quantities, stock, what it was worth — but must never show up as revenue or as
 - `Migrator::migrateToV6()` runs on every request and re-declares the `cash_movements.type` enum —
   it and v11 share `CASH_MOVEMENT_TYPE_ENUM` for that reason. Add future enum values there.
 
+## Storno (Bon stornieren)
+
+- **Where**: Verwaltung → Journal → open a Bon → **"Bon stornieren"** (only shown in Verwaltung, never
+  on the POS receipt after checkout). A short reason is required, plus the Löschkennwort like every
+  other destructive action. Endpoint: `POST /api/receipts/{no}/void` with `{reason, deleteCode}`.
+- **Only Bons of the still-open day**: once a Bon is in a Z-Bericht it can't be voided anymore (409)
+  — that report is closed/emailed and its cash already left the drawer.
+- **Nothing is deleted** (`SaleRepo::void()`, migration v12): the `sales` row gets `voided_at` +
+  `void_reason`, so every report that already filters on `voided_at IS NULL` drops it from the
+  Umsatz. One `cash_movements` row of type `void` reverses exactly what the Bon moved in the drawer
+  (cash sale out again, a Pfand payout back in; 0 for Karte / Ohne Berechnung). Stock of tracked
+  articles is booked back. The Journal shows the original entries marked "storniert" plus the
+  Storno row; the Bon itself shows date and reason. Each Storno is also written to `audit_log`.
+
 ## Reports per email (Journal, Auswertungen, Z-Bericht)
 
 "Per E-Mail senden" on the Journal tab, the Auswertungen tab, and each individual Z-Bericht in

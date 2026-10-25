@@ -169,6 +169,15 @@ final class Api
             return $this->sales->findByReceiptNo($m[1]);
         }
 
+        if ($method === 'POST' && preg_match('#^/api/receipts/([A-Za-z0-9\-]+)/void$#', $path, $m)) {
+            $this->auth->requireAccess();
+            $b = Support::jsonBody();
+            $this->auth->verifyDeleteCode($b['deleteCode'] ?? null);
+            $receipt = $this->sales->void($m[1], (string) ($b['reason'] ?? ''), $this->settings->bool('track_stock', true));
+            $this->audit->log('sale.void', 'Bon ' . $m[1] . ' storniert · ' . $receipt['voidReason']);
+            return $receipt;
+        }
+
         if ($method === 'GET' && $path === '/api/admin/products') {
             $this->auth->requireAccess();
             return $this->adminProducts();
@@ -830,7 +839,7 @@ final class Api
     private const JOURNAL_TAG_TEXT = [
         'sale' => 'Verkauf', 'in' => 'Einlage', 'out' => 'Entnahme',
         'close' => 'Z-Abschluss', 'delivery' => 'Warenzugang', 'deposit_return' => 'Pfand zurück',
-        'comp' => 'Ohne Berechnung',
+        'comp' => 'Ohne Berechnung', 'void' => 'Storno',
     ];
 
     private function emailJournal(): array

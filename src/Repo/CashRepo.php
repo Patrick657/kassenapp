@@ -32,13 +32,16 @@ final class CashRepo
         return $ts === false ? null : (string) $ts;
     }
 
-    /** Cash-paid sales revenue since the given timestamp (or all-time if null). */
+    /** Cash-paid sales revenue since the given timestamp (or all-time if null); stornierte Bons excluded. */
     public function cashRevenueSince(?string $sinceOccurredAt): int
     {
+        $base = "SELECT COALESCE(SUM(m.amount_cents), 0) FROM cash_movements m
+                 LEFT JOIN sales s ON s.id = m.sale_id
+                 WHERE m.type = 'sale' AND m.amount_cents > 0 AND s.voided_at IS NULL";
         if ($sinceOccurredAt === null) {
-            return (int) $this->db->query("SELECT COALESCE(SUM(amount_cents), 0) FROM cash_movements WHERE type = 'sale' AND amount_cents > 0")->fetchColumn();
+            return (int) $this->db->query($base)->fetchColumn();
         }
-        $stmt = $this->db->prepare("SELECT COALESCE(SUM(amount_cents), 0) FROM cash_movements WHERE type = 'sale' AND amount_cents > 0 AND occurred_at > ?");
+        $stmt = $this->db->prepare($base . ' AND m.occurred_at > ?');
         $stmt->execute([$sinceOccurredAt]);
         return (int) $stmt->fetchColumn();
     }

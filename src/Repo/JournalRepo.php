@@ -21,7 +21,7 @@ final class JournalRepo
     public function page(int $limit, ?int $beforeId): array
     {
         $limit = max(1, min(200, $limit));
-        $sql = 'SELECT m.*, s.receipt_no FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id';
+        $sql = 'SELECT m.*, s.receipt_no, s.voided_at FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id';
         $params = [];
         if ($beforeId !== null) {
             $sql .= ' WHERE m.id < ?';
@@ -44,6 +44,7 @@ final class JournalRepo
             'note' => $m['note'],
             'saleId' => $m['sale_id'] !== null ? (int) $m['sale_id'] : null,
             'receiptNo' => $m['receipt_no'],
+            'saleVoided' => $m['voided_at'] !== null,
             'itemsSummary' => $m['sale_id'] !== null ? ($summaries[(int) $m['sale_id']] ?? null) : null,
         ], $rows);
 

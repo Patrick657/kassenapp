@@ -178,6 +178,75 @@ final class SaleRepo
         return $this->receipt($saleId);
     }
 
+    /**
+     * Storno of a whole Bon. Only Bons of the still-open day can be voided: a Bon that's already
+     * in a Z-Bericht is part of a closed, emailed report and its cash has left the drawer, so
+     * voiding it would silently change that report after the fact.
+     *
+     * Nothing is deleted: the sales row gets voided_at + reason (every report already filters on
+     * voided_at), stock comes back, and one cash_movements row of type 'void' reverses exactly
+     * what this Bon moved in the drawer (cash sale in, Pfand payout out; 0 for card/comp).
+     */
+    public function void(string $receiptNo, string $reason, bool $trackStock): array
+    {
+        $reason = trim($reason);
+        if ($reason === '') {
+            throw new ApiException(400, 'Bitte einen Grund für das Storno angeben');
+        }
+        if (mb_strlen($reason) > 255) {
+            throw new ApiException(400, 'Grund ist zu lang (max. 255 Zeichen)');
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare('SELECT * FROM sales WHERE receipt_no = ? FOR UPDATE');
+            $stmt->execute([$receiptNo]);
+            $sale = $stmt->fetch();
+            if (!$sale) {
+                throw new ApiException(404, 'Bon nicht gefunden');
+            }
+            if ($sale['voided_at'] !== null) {
+                throw new ApiException(409, 'Bon ist bereits storniert');
+            }
+            $lastCloseAt = $this->cash->lastCloseOccurredAt();
+            if ($lastCloseAt !== null && $sale['sold_at'] <= $lastCloseAt) {
+                throw new ApiException(409, 'Bon ist bereits im Tagesabschluss enthalten und kann nicht mehr storniert werden');
+            }
+
+            $saleId = (int) $sale['id'];
+            $movedStmt = $this->db->prepare(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM cash_movements WHERE sale_id = ? AND type IN ('sale', 'deposit_return')"
+            );
+            $movedStmt->execute([$saleId]);
+            $reversal = -(int) $movedStmt->fetchColumn();
+            if ($reversal < 0 && -$reversal > $this->cash->balanceCents()) {
+                throw new ApiException(400, 'Nicht genug Bargeld in der Kasse für dieses Storno');
+            }
+
+            $this->db->prepare('UPDATE sales SET voided_at = NOW(), void_reason = ? WHERE id = ?')->execute([$reason, $saleId]);
+
+            if ($trackStock) {
+                $itemStmt = $this->db->prepare('SELECT product_id, qty FROM sale_items WHERE sale_id = ? AND product_id IS NOT NULL');
+                $itemStmt->execute([$saleId]);
+                foreach ($itemStmt->fetchAll() as $item) {
+                    $product = $this->products->find((int) $item['product_id']);
+                    if ($product !== null && (bool) $product['track_stock']) {
+                        $this->products->addStock((int) $item['product_id'], (int) $item['qty']);
+                    }
+                }
+            }
+
+            $this->cash->insert('void', $reversal, 'Storno · ' . $reason, $saleId);
+
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+
+        return $this->receipt($saleId);
+    }
+
     public function receipt(int $saleId): array
     {
         $stmt = $this->db->prepare('SELECT * FROM sales WHERE id = ?');
@@ -186,6 +255,8 @@ final class SaleRepo
         if (!$sale) {
             throw new ApiException(404, 'Bon nicht gefunden');
         }
+        $lastCloseAt = $this->cash->lastCloseOccurredAt();
+        $voidable = $sale['voided_at'] === null && ($lastCloseAt === null || $sale['sold_at'] > $lastCloseAt);
         $itemStmt = $this->db->prepare('SELECT product_id, name, unit_cents, deposit_cents, qty FROM sale_items WHERE sale_id = ?');
         $itemStmt->execute([$saleId]);
         $items = $itemStmt->fetchAll();
@@ -224,6 +295,9 @@ final class SaleRepo
             'compName' => $sale['comp_name'] ?? null,
             'givenCents' => (int) $sale['given_cents'],
             'changeCents' => (int) $sale['change_cents'],
+            'voidedAt' => $sale['voided_at'] !== null ? Support::toIso($sale['voided_at']) : null,
+            'voidReason' => $sale['void_reason'] ?? null,
+            'voidable' => $voidable,
         ];
     }
 

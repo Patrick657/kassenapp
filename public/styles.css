@@ -212,6 +212,9 @@ a { color: var(--accent); }
 .receipt-footer { text-align: center; margin-top: 18px; }
 .receipt-footer .thanks { font-size: 11px; color: var(--text-4); margin-bottom: 12px; }
 .receipt-footer button { width: 100%; padding: 13px; border-radius: 11px; background: var(--ink); color: #fff; font-weight: 700; }
+.receipt-footer .receipt-void-btn { background: var(--err-fill); color: var(--err-text); margin-bottom: 8px; }
+.receipt-void { margin-top: 12px; padding: 9px 11px; border-radius: 9px; background: var(--err-fill); color: var(--err-text); font-size: 12px; line-height: 1.4; }
+.receipt-void .title { font-weight: 800; text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
 
 .form-card {
   width: 380px; max-width: calc(100vw - 32px); background: #fff; border-radius: 18px; padding: 22px;
@@ -225,7 +228,11 @@ a { color: var(--accent); }
 .form-field input, .form-field select {
   width: 100%; padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--field-border); font-size: 14px;
 }
-.form-field input:focus, .form-field select:focus { outline: none; border-color: var(--ink); }
+.form-field input:focus, .form-field select:focus, .form-field textarea:focus { outline: none; border-color: var(--ink); }
+.form-field textarea {
+  width: 100%; padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--field-border); font-size: 14px;
+  font-family: inherit; resize: vertical; min-height: 56px;
+}
 .form-error { color: var(--err-text); font-size: 12px; font-weight: 600; min-height: 16px; margin-bottom: 8px; }
 .form-actions { display: flex; gap: 8px; margin-top: 6px; }
 .form-actions button { padding: 12px; border-radius: 10px; font-size: 13.5px; font-weight: 700; }
@@ -364,6 +371,7 @@ a { color: var(--accent); }
 .journal-row.clickable:hover { background: var(--row-hover); }
 .journal-tag { justify-self: start; font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 7px; }
 .journal-vorgang { color: var(--text-3); font-size: 12px; }
+.journal-voided { display: inline-block; margin-left: 4px; font-family: inherit; font-size: 10px; font-weight: 700; color: var(--err-text); text-transform: uppercase; }
 .journal-items { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
 .journal-amount { text-align: right; }
 

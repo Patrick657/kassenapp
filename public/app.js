@@ -317,6 +317,19 @@ async function submitForm() {
       closeForm();
       return;
     }
+    if (f.kind === 'void') {
+      const reason = (f.reason || '').trim();
+      if (!reason) return setFormError('Bitte einen Grund angeben');
+      if (!(f.code || '').trim()) return setFormError('Löschkennwort fehlt');
+      const rc = await guardedAdminCall(() => api('/receipts/' + encodeURIComponent(f.receiptNo) + '/void', { method: 'POST', body: { reason, deleteCode: f.code } }));
+      if (!rc) return;
+      closeForm();
+      showToast('Bon ' + f.receiptNo + ' storniert');
+      await loadBootstrap();
+      renderHeader();
+      await enterAdminTab(state.adminTab);
+      return;
+    }
     if (f.kind === 'reset-code') {
       const accessCode = (f.accessCode || '').trim();
       if (!accessCode) return setFormError('Neuer Zugangscode fehlt');
@@ -1122,16 +1135,17 @@ function renderStockTab() {
 function renderJournalTab() {
   const items = state.admin.journal;
   if (!items) return '<p>Lädt…</p>';
-  const tagStyles = { sale: 'background:var(--sale-fill);color:var(--sale-text)', in: 'background:var(--info-fill);color:var(--info-text)', out: 'background:var(--warn-fill);color:var(--warn-text)', close: 'background:var(--ink);color:#fff', delivery: 'background:var(--subtle);color:var(--text-3)', deposit_return: 'background:var(--warn-fill);color:var(--warn-text)', comp: 'background:var(--info-fill);color:var(--info-text)' };
-  const tagText = { sale: 'Verkauf', in: 'Einlage', out: 'Entnahme', close: 'Z-Abschluss', delivery: 'Warenzugang', deposit_return: 'Pfand zurück', comp: 'Ohne Berechnung' };
+  const tagStyles = { sale: 'background:var(--sale-fill);color:var(--sale-text)', in: 'background:var(--info-fill);color:var(--info-text)', out: 'background:var(--warn-fill);color:var(--warn-text)', close: 'background:var(--ink);color:#fff', delivery: 'background:var(--subtle);color:var(--text-3)', deposit_return: 'background:var(--warn-fill);color:var(--warn-text)', comp: 'background:var(--info-fill);color:var(--info-text)', void: 'background:var(--err-fill);color:var(--err-text)' };
+  const tagText = { sale: 'Verkauf', in: 'Einlage', out: 'Entnahme', close: 'Z-Abschluss', delivery: 'Warenzugang', deposit_return: 'Pfand zurück', comp: 'Ohne Berechnung', void: 'Storno' };
   const rows = items.map((m) => {
-    const clickable = (m.type === 'sale' || m.type === 'deposit_return' || m.type === 'comp') && m.receiptNo;
+    const clickable = (m.type === 'sale' || m.type === 'deposit_return' || m.type === 'comp' || m.type === 'void') && m.receiptNo;
+    const voidedMark = m.saleVoided && m.type !== 'void' ? ' <span class="journal-voided">storniert</span>' : '';
     const amount = m.type === 'delivery' ? '–' : (m.amountCents > 0 ? '+' : '') + eur(m.amountCents);
     const color = m.type === 'delivery' ? 'var(--text-4)' : m.amountCents < 0 ? 'var(--warn-text)' : 'var(--ink)';
     return `<div class="journal-row ${clickable ? 'clickable' : ''}" ${clickable ? `data-action="open-receipt" data-no="${esc(m.receiptNo)}"` : ''}>
       <span class="mono">${fmtDateTimeShort(m.occurredAt)}</span>
       <span class="journal-tag" style="${tagStyles[m.type] || ''}">${tagText[m.type] || m.type}</span>
-      <span class="mono journal-vorgang">${m.receiptNo ? esc(m.receiptNo) : '–'}</span>
+      <span class="mono journal-vorgang">${m.receiptNo ? esc(m.receiptNo) : '–'}${voidedMark}</span>
       <div>
         <div>${esc(m.note)}</div>
         ${m.itemsSummary ? `<div class="journal-items">${esc(m.itemsSummary)}</div>` : ''}
@@ -1324,12 +1338,13 @@ function renderReceiptOverlay() {
     <div class="receipt-card">
       <div class="receipt-shop">${esc(state.shopName)}</div>
       <div class="receipt-meta">${fmtDateTime(rc.soldAt)} · Bon ${esc(rc.receiptNo)}</div>
+      ${rc.voidedAt ? `<div class="receipt-void"><div class="title">Storniert · ${fmtDateTime(rc.voidedAt)}</div><div>${esc(rc.voidReason || '')}</div></div>` : ''}
       <hr class="receipt-divider">
       ${rc.items.map((i) => `<div class="receipt-line"><span class="qty mono">${i.qty}×</span><span class="name">${esc(i.name)}</span><span class="mono">${eur(i.unitCents * i.qty)}</span></div>${i.depositCents ? `<div class="receipt-line" style="color:var(--text-3);font-size:11.5px"><span class="qty"></span><span class="name">davon Pfand ${i.qty}× ${eur(i.depositCents)}</span><span class="mono">${eur(i.depositCents * i.qty)}</span></div>` : ''}`).join('')}
       ${rc.returns.map((r) => `<div class="receipt-line" style="color:var(--warn-text)"><span class="qty mono">${r.qty}×</span><span class="name">↩ Pfand zurück · ${esc(r.name)}</span><span class="mono">−${eur(r.amountCents)}</span></div>`).join('')}
       <hr class="receipt-divider">
       ${rows.map((r) => `<div class="receipt-totals-row" style="font-weight:${r.weight};font-size:${r.size}"><span>${esc(r.label)}</span><span class="mono">${r.value}</span></div>`).join('')}
-      <div class="receipt-footer"><div class="thanks">Vielen Dank für Ihren Einkauf</div><button data-action="close-receipt">Weiter</button></div>
+      <div class="receipt-footer"><div class="thanks">Vielen Dank für Ihren Einkauf</div>${state.view === 'admin' && canUseAdmin() && rc.voidable ? `<button data-action="void-receipt" data-no="${esc(rc.receiptNo)}" class="receipt-void-btn">Bon stornieren</button>` : ''}<button data-action="close-receipt">Weiter</button></div>
     </div>
   </div>`;
 }
@@ -1343,6 +1358,13 @@ function renderFormOverlay() {
     hint = f.hint + (f.noCode ? '' : ' Zum Bestätigen das Löschkennwort eingeben.');
     fields = f.noCode ? '' : F('Löschkennwort', 'code', '••••', 'password');
     submitLabel = f.submitLabel || 'Endgültig löschen';
+    dangerSubmit = true;
+  } else if (f.kind === 'void') {
+    title = 'Bon stornieren · ' + f.receiptNo;
+    hint = 'Der Bon zählt danach nicht mehr zum Umsatz, der Bestand wird zurückgebucht und die Kasse per Gegenbuchung korrigiert. Der Bon bleibt im Journal sichtbar.';
+    fields = `<div class="form-field"><label>Grund</label><textarea data-form-key="reason" rows="2" maxlength="255" placeholder="z. B. Falsch getippt, Kunde hat storniert">${esc(f.reason || '')}</textarea></div>`;
+    fields += F('Löschkennwort', 'code', '••••', 'password');
+    submitLabel = 'Stornieren';
     dangerSubmit = true;
   } else if (f.kind === 'price') {
     title = 'Preis · ' + f.name;
@@ -1557,6 +1579,7 @@ function onAction(e) {
     case 'checkout': return void checkout();
 
     case 'close-receipt': state.receipt = null; return renderOverlay();
+    case 'void-receipt': state.receipt = null; return openForm({ kind: 'void', receiptNo: d.no, reason: '', code: '' });
     case 'close-form': return closeForm();
     case 'submit-form': return void submitForm();
     case 'pin-press': return void pinPress(d.key);

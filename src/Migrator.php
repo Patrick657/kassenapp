@@ -20,9 +20,9 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 11;
+    private const LATEST_VERSION = 12;
 
-    private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp')";
+    private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp','void')";
 
     public function __construct(private readonly PDO $db)
     {
@@ -95,6 +95,14 @@ final class Migrator
                 $this->setVersion(11);
             } catch (\Throwable $e) {
                 error_log('[Festkasse Migrator] v11 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 12) {
+            try {
+                $this->migrateToV12();
+                $this->setVersion(12);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v12 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
             }
         }
     }
@@ -173,8 +181,8 @@ final class Migrator
             'ALTER TABLE sales ADD COLUMN deposit_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER discount_cents'
         );
         // This step runs on every request (see ensureUpToDate()), so the enum declared here must
-        // always be the full, current list — including values added by later steps ('comp' from
-        // migrateToV11()). Declaring the shorter original list would strip them again each time.
+        // always be the full, current list — including values added by later steps ('comp'/'void' from
+        // migrateToV11()/V12()). Declaring the shorter original list would strip them again each time.
         $this->db->exec(
             "ALTER TABLE cash_movements MODIFY COLUMN type " . self::CASH_MOVEMENT_TYPE_ENUM . " NOT NULL"
         );
@@ -313,6 +321,24 @@ final class Migrator
             'ALTER TABLE sales ADD COLUMN comp_name VARCHAR(60) NULL AFTER comp_account_id'
         );
         $this->db->exec("ALTER TABLE sales MODIFY COLUMN payment ENUM('cash','card','comp') NOT NULL");
+        $this->db->exec(
+            "ALTER TABLE cash_movements MODIFY COLUMN type " . self::CASH_MOVEMENT_TYPE_ENUM . " NOT NULL"
+        );
+    }
+
+    /**
+     * Storno: an admin can void a Bon of the still-open day (Verwaltung → Journal → Bon). The
+     * sales row stays (voided_at was in the baseline schema already, every report filters on it)
+     * and now also keeps the reason. The drawer is corrected by a counter-booking of the new
+     * cash_movements type 'void' — nothing that was booked gets deleted or rewritten.
+     */
+    private function migrateToV12(): void
+    {
+        $this->ensureColumn(
+            'sales',
+            'void_reason',
+            'ALTER TABLE sales ADD COLUMN void_reason VARCHAR(255) NULL AFTER voided_at'
+        );
         $this->db->exec(
             "ALTER TABLE cash_movements MODIFY COLUMN type " . self::CASH_MOVEMENT_TYPE_ENUM . " NOT NULL"
         );
