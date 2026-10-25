@@ -347,6 +347,35 @@ renaming or deleting a user later doesn't change the journal. Shown as column "B
 Verwaltung → Journal and in the header line of each entry in the Journal-PDF. Entries from before
 v13, or booked while no users are set up, show "–".
 
+## Mehrere Kassen (z. B. Getränke-Stand und Merch-Stand)
+
+Added for a Fest with two stands: Kasse 1 sells Bier/Getränke, Kasse 2 Merch. Each Kasse has its
+own drawer and books separately.
+
+- **Verwaltung → Kassen** (`registers`, migration v14): create/rename Kassen and tick which
+  Artikelgruppen each one sells (`register_categories`; none ticked = sells everything). The
+  button **"Diesem Gerät zuordnen"** binds the current device to a Kasse via the httponly cookie
+  `festkasse_register` (5 years; only an admin can set it, `POST /api/device/register`).
+  `RegisterRepo::forDevice()` resolves it on every request; while only one Kasse exists every
+  device simply uses it, so a single-stand install needs no setup at all.
+- **Unassigned device** (several Kassen, no cookie): the POS shows "Dieses Gerät ist noch keiner
+  Kasse zugeordnet" and `POST /api/sales` answers 409. Verwaltung keeps working.
+- **Separate per Kasse**: `sales.register_id`, `cash_movements.register_id`,
+  `z_reports.register_id`. Kassenbestand, Journal (+ PDF), Einlage/Entnahme, Tagesabschluss and
+  the header's Kassenbestand / Umsatz heute are always one Kasse's. Z-Berichte are numbered per
+  Kasse (`UNIQUE(register_id, no)`) and addressed by row id (`/api/z-reports/{id}/email`).
+  Journal and Kasse tabs have a Kasse picker (defaults to this device's Kasse); their API calls
+  take `registerId`.
+- **Article filter**: the POS shows the intersection of the Kasse's groups and the logged-in
+  cashier's groups (`Api::allowedCategoriesHere()`), enforced again server-side on checkout.
+- **Storno** books back into the Kasse of the Bon, from whichever device. **Warenzugang**
+  (stock is shared) is filed in the journal of the Kasse that sells that article group, if
+  exactly one does; otherwise in this device's Kasse.
+- **Übersicht / Auswertungen** have a filter Gesamt / Kasse 1 / Kasse 2 (`?registerId=all|id`
+  on every `/api/reports/*`, also used by "Per E-Mail senden").
+- **Upgrade**: v14 creates "Kasse 1" and assigns all existing bookings, journal entries and
+  Z-Berichte to it. A Kasse can only be deleted while nothing has been booked on it.
+
 ## Reports per email (Journal, Auswertungen, Z-Bericht)
 
 "Per E-Mail senden" on the Journal tab, the Auswertungen tab, and each individual Z-Bericht in

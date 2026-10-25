@@ -7,36 +7,45 @@ use Festkasse\ApiException;
 use Festkasse\Support;
 use PDO;
 
+/**
+ * Tagesabschlüsse per Kasse: each Kasse closes its own drawer and numbers its own Z-Berichte
+ * (Kasse 1: Z-1, Z-2 … / Kasse 2: Z-1, Z-2 …). A report is addressed by its row id, since the
+ * number alone is no longer unique.
+ */
 final class ZReportRepo
 {
     public function __construct(private readonly PDO $db, private readonly CashRepo $cash)
     {
     }
 
-    public function list(): array
+    public function list(int $registerId): array
     {
-        $rows = $this->db->query('SELECT * FROM z_reports ORDER BY no DESC')->fetchAll();
-        return array_map(static fn ($r) => [
-            'no' => (int) $r['no'],
-            'closedAt' => Support::toIso($r['closed_at']),
-            'salesCount' => (int) $r['sales_count'],
-            'cashCents' => (int) $r['cash_cents'],
-            'cardCents' => (int) $r['card_cents'],
-            'totalCents' => (int) $r['total_cents'],
-        ], $rows);
+        $stmt = $this->db->prepare(
+            'SELECT z.*, r.name AS register_name FROM z_reports z LEFT JOIN registers r ON r.id = z.register_id
+             WHERE z.register_id = ? ORDER BY z.no DESC'
+        );
+        $stmt->execute([$registerId]);
+        return array_map(static fn ($r) => self::toClient($r), $stmt->fetchAll());
     }
 
-    /** One specific closed Z-Bericht by its number, for "per E-Mail senden" on that report. */
-    public function find(int $no): ?array
+    /** One specific closed Z-Bericht, for "per E-Mail senden" on that report. */
+    public function find(int $id): ?array
     {
-        $stmt = $this->db->prepare('SELECT * FROM z_reports WHERE no = ?');
-        $stmt->execute([$no]);
+        $stmt = $this->db->prepare(
+            'SELECT z.*, r.name AS register_name FROM z_reports z LEFT JOIN registers r ON r.id = z.register_id WHERE z.id = ?'
+        );
+        $stmt->execute([$id]);
         $r = $stmt->fetch();
-        if (!$r) {
-            return null;
-        }
+        return $r ? self::toClient($r) : null;
+    }
+
+    private static function toClient(array $r): array
+    {
         return [
+            'id' => (int) $r['id'],
             'no' => (int) $r['no'],
+            'registerId' => (int) $r['register_id'],
+            'registerName' => $r['register_name'],
             'closedAt' => Support::toIso($r['closed_at']),
             'fromSaleAt' => $r['from_sale_at'] !== null ? Support::toIso($r['from_sale_at']) : null,
             'salesCount' => (int) $r['sales_count'],
@@ -47,20 +56,36 @@ final class ZReportRepo
         ];
     }
 
-    /** Individual sales that make up one closed Z-Bericht, oldest first — for its PDF listing. */
-    public function salesFor(int $no): array
+    /** Period and Kasse of one Z-Bericht, as the WHERE fragment + params its listings filter on. */
+    private function periodFilter(int $id): ?array
     {
-        $stmt = $this->db->prepare('SELECT from_sale_at, closed_at FROM z_reports WHERE no = ?');
-        $stmt->execute([$no]);
+        $stmt = $this->db->prepare('SELECT register_id, from_sale_at, closed_at FROM z_reports WHERE id = ?');
+        $stmt->execute([$id]);
         $z = $stmt->fetch();
         if (!$z) {
+            return null;
+        }
+        $sql = ' AND register_id = ? AND sold_at <= ?';
+        $params = [(int) $z['register_id'], $z['closed_at']];
+        if ($z['from_sale_at'] !== null) {
+            $sql .= ' AND sold_at > ?';
+            $params[] = $z['from_sale_at'];
+        }
+        return [$sql, $params];
+    }
+
+    /** Individual sales that make up one closed Z-Bericht, oldest first — for its PDF listing. */
+    public function salesFor(int $id): array
+    {
+        $filter = $this->periodFilter($id);
+        if ($filter === null) {
             return [];
         }
-        $sql = "SELECT receipt_no, sold_at, " . ReportsRepo::NET_CENTS . " AS total_cents, payment FROM sales
-                WHERE voided_at IS NULL AND payment <> 'comp' AND sold_at <= ?" . ($z['from_sale_at'] !== null ? ' AND sold_at > ?' : '')
-            . ' ORDER BY sold_at ASC';
-        $params = $z['from_sale_at'] !== null ? [$z['closed_at'], $z['from_sale_at']] : [$z['closed_at']];
-        $stmt = $this->db->prepare($sql);
+        [$where, $params] = $filter;
+        $stmt = $this->db->prepare(
+            "SELECT receipt_no, sold_at, " . ReportsRepo::NET_CENTS . " AS total_cents, payment FROM sales
+             WHERE voided_at IS NULL AND payment <> 'comp'" . $where . ' ORDER BY sold_at ASC'
+        );
         $stmt->execute($params);
         return array_map(static fn ($r) => [
             'receiptNo' => $r['receipt_no'],
@@ -74,19 +99,18 @@ final class ZReportRepo
      * "Ohne Berechnung" bookings inside one closed Z-Bericht's period, summed per Bereich — shown
      * on its PDF for information only; they are in none of the report's Bar/Karte/Umsatz totals.
      */
-    public function compFor(int $no): array
+    public function compFor(int $id): array
     {
-        $stmt = $this->db->prepare('SELECT from_sale_at, closed_at FROM z_reports WHERE no = ?');
-        $stmt->execute([$no]);
-        $z = $stmt->fetch();
-        if (!$z) {
+        $filter = $this->periodFilter($id);
+        if ($filter === null) {
             return [];
         }
-        $sql = "SELECT comp_name, COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS value_cents FROM sales
-                WHERE voided_at IS NULL AND payment = 'comp' AND sold_at <= ?" . ($z['from_sale_at'] !== null ? ' AND sold_at > ?' : '')
-            . ' GROUP BY comp_name ORDER BY value_cents DESC';
-        $stmt = $this->db->prepare($sql);
-        $stmt->execute($z['from_sale_at'] !== null ? [$z['closed_at'], $z['from_sale_at']] : [$z['closed_at']]);
+        [$where, $params] = $filter;
+        $stmt = $this->db->prepare(
+            "SELECT comp_name, COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS value_cents FROM sales
+             WHERE voided_at IS NULL AND payment = 'comp'" . $where . ' GROUP BY comp_name ORDER BY value_cents DESC'
+        );
+        $stmt->execute($params);
         return array_map(static fn ($r) => [
             'name' => (string) ($r['comp_name'] ?? '') !== '' ? $r['comp_name'] : 'Ohne Bereich',
             'count' => (int) $r['cnt'],
@@ -94,17 +118,17 @@ final class ZReportRepo
         ], $stmt->fetchAll());
     }
 
-    public function close(): array
+    public function close(int $registerId): array
     {
-        $lastCloseAt = $this->cash->lastCloseOccurredAt();
+        $lastCloseAt = $this->cash->lastCloseOccurredAt($registerId);
         $sql = "SELECT COUNT(*) AS cnt,
                        COALESCE(SUM(CASE WHEN payment = 'cash' THEN total_cents ELSE 0 END), 0) AS cash_cents,
                        COALESCE(SUM(CASE WHEN payment = 'card' THEN total_cents ELSE 0 END), 0) AS card_cents,
                        COALESCE(SUM(deposit_returned_cents), 0) AS returned_cents
                 FROM sales
-                WHERE voided_at IS NULL AND payment <> 'comp'" . ($lastCloseAt !== null ? ' AND sold_at > ?' : '');
+                WHERE voided_at IS NULL AND payment <> 'comp' AND register_id = ?" . ($lastCloseAt !== null ? ' AND sold_at > ?' : '');
         $stmt = $this->db->prepare($sql);
-        $stmt->execute($lastCloseAt !== null ? [$lastCloseAt] : []);
+        $stmt->execute($lastCloseAt !== null ? [$registerId, $lastCloseAt] : [$registerId]);
         $row = $stmt->fetch();
 
         if ((int) $row['cnt'] === 0) {
@@ -115,21 +139,24 @@ final class ZReportRepo
         // paid out in cash even when the same checkout was paid by card. Clamped at 0: the
         // z_reports columns are UNSIGNED.
         $row['cash_cents'] = max(0, (int) $row['cash_cents'] - (int) $row['returned_cents']);
-
-        $balance = $this->cash->balanceCents();
-        $no = (int) ($this->db->query('SELECT COALESCE(MAX(no), 0) FROM z_reports')->fetchColumn()) + 1;
         $total = (int) $row['cash_cents'] + (int) $row['card_cents'];
 
         $this->db->beginTransaction();
         try {
+            $balance = $this->cash->balanceCents($registerId);
+            $noStmt = $this->db->prepare('SELECT COALESCE(MAX(no), 0) + 1 FROM z_reports WHERE register_id = ? FOR UPDATE');
+            $noStmt->execute([$registerId]);
+            $no = (int) $noStmt->fetchColumn();
+
             $stmt = $this->db->prepare(
-                'INSERT INTO z_reports (no, closed_at, from_sale_at, sales_count, cash_cents, card_cents, total_cents, drawer_cents)
-                 VALUES (?, NOW(), ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO z_reports (no, register_id, closed_at, from_sale_at, sales_count, cash_cents, card_cents, total_cents, drawer_cents)
+                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?)'
             );
-            $stmt->execute([$no, $lastCloseAt, (int) $row['cnt'], (int) $row['cash_cents'], (int) $row['card_cents'], $total, $balance]);
+            $stmt->execute([$no, $registerId, $lastCloseAt, (int) $row['cnt'], (int) $row['cash_cents'], (int) $row['card_cents'], $total, $balance]);
+            $id = (int) $this->db->lastInsertId();
 
             $note = 'Tagesabschluss Z-' . $no . ' · Bar entnommen ' . Support::eur($balance);
-            $this->cash->insert('close', -$balance, $note);
+            $this->cash->insert($registerId, 'close', -$balance, $note);
 
             $this->db->commit();
         } catch (\Throwable $e) {
@@ -138,6 +165,7 @@ final class ZReportRepo
         }
 
         return [
+            'id' => $id,
             'no' => $no,
             'salesCount' => (int) $row['cnt'],
             'cashCents' => (int) $row['cash_cents'],

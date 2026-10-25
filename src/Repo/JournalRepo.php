@@ -12,19 +12,17 @@ final class JournalRepo
     {
     }
 
-    public function count(): int
-    {
-        return (int) $this->db->query('SELECT COUNT(*) FROM cash_movements')->fetchColumn();
-    }
-
-    /** @return array{items: array<int, array>, nextBefore: ?int} */
-    public function page(int $limit, ?int $beforeId): array
+    /**
+     * One Kasse's journal, newest first. Each Kasse has its own — two stands never share one.
+     * @return array{items: array<int, array>, nextBefore: ?int}
+     */
+    public function page(int $registerId, int $limit, ?int $beforeId): array
     {
         $limit = max(1, min(200, $limit));
-        $sql = 'SELECT m.*, s.receipt_no, s.voided_at FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id';
-        $params = [];
+        $sql = 'SELECT m.*, s.receipt_no, s.voided_at FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id WHERE m.register_id = ?';
+        $params = [$registerId];
         if ($beforeId !== null) {
-            $sql .= ' WHERE m.id < ?';
+            $sql .= ' AND m.id < ?';
             $params[] = $beforeId;
         }
         $sql .= ' ORDER BY m.id DESC LIMIT ' . ($limit + 1);
@@ -63,14 +61,18 @@ final class JournalRepo
      * returns per-item 'lines' (not a single joined string) so the PDF can print one purchased
      * article — or one returned Pfand-Option — per line instead of cramming them together.
      */
-    public function exportRows(int $limit = 5000): array
+    public function exportRows(int $registerId, int $limit = 5000): array
     {
-        $sql = 'SELECT m.*, s.receipt_no, s.comp_name, dt.name AS deposit_type_name
-                FROM cash_movements m
-                LEFT JOIN sales s ON s.id = m.sale_id
-                LEFT JOIN deposit_types dt ON dt.id = m.deposit_type_id
-                ORDER BY m.id ASC LIMIT ' . max(1, $limit);
-        $rows = $this->db->query($sql)->fetchAll();
+        $stmt = $this->db->prepare(
+            'SELECT m.*, s.receipt_no, s.comp_name, s.voided_at, dt.name AS deposit_type_name
+             FROM cash_movements m
+             LEFT JOIN sales s ON s.id = m.sale_id
+             LEFT JOIN deposit_types dt ON dt.id = m.deposit_type_id
+             WHERE m.register_id = ?
+             ORDER BY m.id ASC LIMIT ' . max(1, $limit)
+        );
+        $stmt->execute([$registerId]);
+        $rows = $stmt->fetchAll();
 
         $saleIds = array_values(array_unique(array_filter(
             array_map(static fn ($r) => in_array($r['type'], ['sale', 'comp'], true) && $r['sale_id'] !== null ? (int) $r['sale_id'] : null, $rows)
@@ -95,6 +97,7 @@ final class JournalRepo
                 'compName' => $m['comp_name'],
                 'userName' => $m['user_name'],
                 'lines' => $lines,
+                'saleVoided' => $m['voided_at'] !== null,
             ];
         }, $rows);
     }

@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 13;
+    private const LATEST_VERSION = 14;
 
     private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp','void')";
 
@@ -111,6 +111,14 @@ final class Migrator
                 $this->setVersion(13);
             } catch (\Throwable $e) {
                 error_log('[Festkasse Migrator] v13 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 14) {
+            try {
+                $this->migrateToV14();
+                $this->setVersion(14);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v14 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
             }
         }
     }
@@ -369,6 +377,68 @@ final class Migrator
             'user_name',
             'ALTER TABLE cash_movements ADD COLUMN user_name VARCHAR(60) NULL AFTER user_id'
         );
+    }
+
+    /**
+     * Mehrere Kassen (e.g. Kasse 1 = Getränke, Kasse 2 = Merch at a different stand): each has its
+     * own drawer, journal and Z-Berichte (numbered per Kasse), optionally its own article groups.
+     * Everything booked so far belongs to "Kasse 1", created here, so an existing install keeps
+     * working unchanged. z_reports.no becomes unique per Kasse instead of globally.
+     */
+    private function migrateToV14(): void
+    {
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS registers (
+                id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name       VARCHAR(60) NOT NULL,
+                sort_order INT         NOT NULL DEFAULT 0,
+                created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS register_categories (
+                register_id INT UNSIGNED NOT NULL,
+                category_id INT UNSIGNED NOT NULL,
+                PRIMARY KEY (register_id, category_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        foreach (['sales' => 'payment', 'cash_movements' => 'type', 'z_reports' => 'no'] as $table => $after) {
+            $this->ensureColumn($table, 'register_id', "ALTER TABLE {$table} ADD COLUMN register_id INT UNSIGNED NULL AFTER {$after}");
+        }
+        $this->ensureIndex('sales', 'idx_sales_register', 'ALTER TABLE sales ADD INDEX idx_sales_register (register_id, sold_at)');
+        $this->ensureIndex('cash_movements', 'idx_cash_movements_register', 'ALTER TABLE cash_movements ADD INDEX idx_cash_movements_register (register_id)');
+
+        if ((int) $this->db->query('SELECT COUNT(*) FROM registers')->fetchColumn() === 0) {
+            $this->db->exec("INSERT INTO registers (name, sort_order) VALUES ('Kasse 1', 1)");
+        }
+        $firstId = (int) $this->db->query('SELECT id FROM registers ORDER BY sort_order ASC, id ASC LIMIT 1')->fetchColumn();
+        foreach (['sales', 'cash_movements', 'z_reports'] as $table) {
+            $this->db->prepare("UPDATE {$table} SET register_id = ? WHERE register_id IS NULL")->execute([$firstId]);
+        }
+
+        // Z-numbers per Kasse: replace the old global UNIQUE(no) with UNIQUE(register_id, no).
+        $stmt = $this->db->query(
+            "SELECT DISTINCT s.index_name FROM information_schema.statistics s
+             WHERE s.table_schema = DATABASE() AND s.table_name = 'z_reports' AND s.non_unique = 0
+               AND s.index_name <> 'PRIMARY' AND s.column_name = 'no'
+               AND (SELECT COUNT(*) FROM information_schema.statistics s2
+                    WHERE s2.table_schema = s.table_schema AND s2.table_name = s.table_name AND s2.index_name = s.index_name) = 1"
+        );
+        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $indexName) {
+            $this->db->exec('ALTER TABLE z_reports DROP INDEX `' . str_replace('`', '', (string) $indexName) . '`');
+        }
+        $this->ensureIndex('z_reports', 'uq_z_reports_register_no', 'ALTER TABLE z_reports ADD UNIQUE INDEX uq_z_reports_register_no (register_id, no)');
+    }
+
+    private function ensureIndex(string $table, string $indexName, string $alterSql): void
+    {
+        $stmt = $this->db->prepare(
+            'SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?'
+        );
+        $stmt->execute([$table, $indexName]);
+        if ((int) $stmt->fetchColumn() === 0) {
+            $this->db->exec($alterSql);
+        }
     }
 
     /**

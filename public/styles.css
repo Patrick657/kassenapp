@@ -405,6 +405,9 @@ a { color: var(--accent); }
 .badge-inactive { background: var(--fill); color: var(--text-3); }
 .checkbox-list { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--field-border); border-radius: 10px; }
 .checkbox-row { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; }
+/* inside a form the generic .form-field label/input rules would otherwise win (uppercase label, full-width checkbox) */
+.form-field .checkbox-row { display: flex; margin: 0; font-size: 13px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--ink); cursor: pointer; }
+.form-field .checkbox-row input { width: auto; padding: 0; }
 .settings-text-field { width: 220px; padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--field-border); font-size: 14px; cursor: text; }
 .settings-text-field:focus { outline: none; border-color: var(--ink); }
 .switch-track { flex: none; width: 48px; height: 28px; border-radius: 99px; padding: 3px; display: flex; transition: background .15s; background: rgba(0,0,0,.16); }
@@ -444,3 +447,5 @@ a { color: var(--accent); }
   .header { gap: 10px; }
   .header .kpi:nth-of-type(2) { display: none; }
 }
+.register-picker { margin-bottom: 12px; }
+.register-unassigned-hint { max-width: 420px; text-align: center; font-size: 13.5px; color: var(--text-2); line-height: 1.5; }

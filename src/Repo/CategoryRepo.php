@@ -140,6 +140,7 @@ final class CategoryRepo
         if ($productCount > 0) {
             throw new ApiException(400, 'Gruppe wird noch von ' . $productCount . ' Artikel(n) verwendet — erst verschieben oder löschen');
         }
+        $this->db->prepare('DELETE FROM register_categories WHERE category_id = ?')->execute([$id]);
         $this->db->prepare('DELETE FROM categories WHERE id = ?')->execute([$id]);
     }
 }

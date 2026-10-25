@@ -75,6 +75,11 @@ const state = {
   compAccounts: [],
   cashBalanceCents: 0,
   todayRevenueCents: 0,
+  // Kassen: this device's Kasse (null = several exist, device not assigned yet) and all Kassen.
+  register: null,
+  registers: [],
+  adminRegisterId: null, // Kasse shown in Verwaltung → Journal / Kasse
+  reportRegister: 'all', // Übersicht / Auswertungen: 'all' = Gesamt, or a Kasse id
   access: { unlocked: false, expiresAt: null, codeConfigured: false },
   posUsers: [],
   posUser: null,
@@ -107,7 +112,7 @@ const state = {
   toast: '',
   clock: '',
 
-  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, depositTypes: null, compAccounts: null, comp: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null },
+  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, depositTypes: null, compAccounts: null, comp: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null, registers: null, deviceRegisterId: null },
 };
 
 let toastTimer = null;
@@ -135,6 +140,12 @@ async function loadBootstrap() {
   state.access = data.access;
   state.posUsers = data.posUsers || [];
   state.posUser = data.posUser || null;
+  state.register = data.register || null;
+  state.registers = data.registers || [];
+  if (!state.registers.some((r) => r.id === state.adminRegisterId)) {
+    state.adminRegisterId = state.register ? state.register.id : (state.registers[0] ? state.registers[0].id : null);
+  }
+  if (state.reportRegister !== 'all' && !state.registers.some((r) => r.id === state.reportRegister)) state.reportRegister = 'all';
   state.loaded = true;
 }
 
@@ -433,6 +444,18 @@ async function submitForm() {
       renderMain();
       return;
     }
+    if (f.kind === 'register') {
+      const name = (f.name || '').trim();
+      if (!name) return setFormError('Name fehlt');
+      const body = { name, categoryIds: f.categoryIds || [] };
+      await guardedAdminCall(() => (f.id ? api('/registers/' + f.id, { method: 'PATCH', body }) : api('/registers', { method: 'POST', body })));
+      closeForm();
+      showToast(f.id ? 'Kasse gespeichert' : 'Kasse angelegt');
+      await Promise.all([loadBootstrap(), loadRegisters()]);
+      renderHeader();
+      renderMain();
+      return;
+    }
     if (f.kind === 'delivery') {
       const qty = Math.round(parseAmount(f.qty || '0'));
       if (qty <= 0) return setFormError('Menge muss größer als 0 sein');
@@ -447,9 +470,9 @@ async function submitForm() {
     if (f.kind === 'in' || f.kind === 'out') {
       const amount = toCents(f.amount || '0');
       if (amount <= 0) return setFormError('Betrag muss größer als 0 sein');
-      await guardedAdminCall(() => api('/cash-movements', { method: 'POST', body: { type: f.kind, amountCents: amount, note: f.note || '' } }));
+      await guardedAdminCall(() => api('/cash-movements', { method: 'POST', body: { type: f.kind, amountCents: amount, note: f.note || '', registerId: state.adminRegisterId } }));
       closeForm();
-      showToast((f.kind === 'in' ? 'Einlage' : 'Entnahme') + ' ' + eur(amount) + ' gebucht');
+      showToast((f.kind === 'in' ? 'Einlage' : 'Entnahme') + ' ' + eur(amount) + ' gebucht' + (multiRegister() ? ' · ' + registerName(state.adminRegisterId) : ''));
       await Promise.all([loadBootstrap(), loadCashStatus()]);
       renderHeader();
       renderMain();
@@ -490,12 +513,12 @@ async function loadAdminProducts() {
 }
 async function loadOverview() {
   const [kpis, daily, hourly, ranking, payments] = await guardedAdminCall(() => Promise.all([
-    api('/reports/kpis'), api('/reports/daily'), api('/reports/hourly'), api('/reports/products'), api('/reports/payments'),
+    api('/reports/kpis?' + reportRegisterQuery()), api('/reports/daily?' + reportRegisterQuery()), api('/reports/hourly?' + reportRegisterQuery()), api('/reports/products?' + reportRegisterQuery()), api('/reports/payments?' + reportRegisterQuery()),
   ])) || [null, null, null, null, null];
   Object.assign(state.admin, { kpis, daily, hourly, ranking, payments });
 }
 async function loadGroups() {
-  const [groups, comp] = await guardedAdminCall(() => Promise.all([api('/reports/groups'), api('/reports/comp')])) || [null, null];
+  const [groups, comp] = await guardedAdminCall(() => Promise.all([api('/reports/groups?' + reportRegisterQuery()), api('/reports/comp?' + reportRegisterQuery())])) || [null, null];
   if (groups) Object.assign(state.admin, { groups, comp });
 }
 async function loadCompAccounts() {
@@ -514,14 +537,14 @@ async function loadDepositTypes() {
   return data;
 }
 async function loadJournal(before) {
-  const data = await guardedAdminCall(() => api('/journal' + (before ? '?before=' + before + '&limit=80' : '?limit=80')));
+  const data = await guardedAdminCall(() => api('/journal?' + adminRegisterQuery() + (before ? '&before=' + before : '') + '&limit=80'));
   if (data) {
     state.admin.journal = before ? (state.admin.journal || []).concat(data.items) : data.items;
     state.admin.journalBefore = data.nextBefore;
   }
 }
 async function loadCashStatus() {
-  const [status, zReports] = await guardedAdminCall(() => Promise.all([api('/cash/status'), api('/z-reports')])) || [null, null];
+  const [status, zReports] = await guardedAdminCall(() => Promise.all([api('/cash/status?' + adminRegisterQuery()), api('/z-reports?' + adminRegisterQuery())])) || [null, null];
   Object.assign(state.admin, { cashStatus: status, zReports });
 }
 async function loadMaintenanceCounts() {
@@ -531,6 +554,10 @@ async function loadMaintenanceCounts() {
 async function loadRecoveryEmail() {
   const data = await guardedAdminCall(() => api('/settings/codes'));
   if (data) state.admin.recoveryEmail = data.recoveryEmail;
+}
+async function loadRegisters() {
+  const data = await guardedAdminCall(() => api('/registers'));
+  if (data) { state.admin.registers = data.registers; state.admin.deviceRegisterId = data.deviceRegisterId; }
 }
 async function loadUsers() {
   const data = await guardedAdminCall(() => api('/users'));
@@ -547,6 +574,7 @@ async function enterAdminTab(tab) {
   else if (tab === 'deposit') await loadDepositTypes();
   else if (tab === 'comp') await loadCompAccounts();
   else if (tab === 'users') await Promise.all([loadUsers(), loadCategories()]);
+  else if (tab === 'registers') await Promise.all([loadRegisters(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
   else if (tab === 'cash') await loadCashStatus();
   else if (tab === 'settings') await Promise.all([loadMaintenanceCounts(), loadRecoveryEmail()]);
@@ -657,6 +685,18 @@ function lockLabel() {
   return 'Sperren · ' + (m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min');
 }
 
+function multiRegister() { return state.registers.length > 1; }
+function registerName(id) { const r = state.registers.find((x) => x.id === id); return r ? r.name : ''; }
+function adminRegisterQuery() { return 'registerId=' + encodeURIComponent(state.adminRegisterId || ''); }
+function reportRegisterQuery() { return 'registerId=' + encodeURIComponent(state.reportRegister); }
+
+/** Kasse picker shown on Journal / Kasse (one Kasse) and Übersicht / Auswertungen (+ Gesamt). */
+function registerPicker(action, current, withAll) {
+  if (!multiRegister()) return '';
+  const opts = (withAll ? [{ id: 'all', name: 'Gesamt' }] : []).concat(state.registers);
+  return `<div class="group-chips register-picker">${opts.map((r) => `<button data-action="${action}" data-id="${r.id}" class="group-chip ${current === r.id ? 'active' : ''}">${esc(r.name)}${state.register && r.id === state.register.id ? ' · dieses Gerät' : ''}</button>`).join('')}</div>`;
+}
+
 function canUseAdmin() {
   const hasAdminUser = state.posUsers.some((u) => u.role === 'admin');
   if (!hasAdminUser) return true; // no admin POS account set up yet — access code alone still works
@@ -696,7 +736,7 @@ function renderHeader() {
   const el = document.getElementById('header-root');
   const showLock = state.settings.requireCode && state.access.unlocked;
   el.innerHTML = `
-    <div class="brand"><span class="name">${esc(state.shopName)}</span><span class="tag">POS + WaWi</span></div>
+    <div class="brand"><span class="name">${esc(state.shopName)}</span><span class="tag">${multiRegister() ? (state.register ? esc(state.register.name) : 'Keine Kasse') : 'POS + WaWi'}</span></div>
     <div class="switch">
       <button data-action="go-pos" class="${state.view === 'pos' ? 'active' : ''}">Kasse</button>
       ${canUseAdmin() ? `<button data-action="go-admin" class="${state.view === 'admin' ? 'active' : ''}">Verwaltung</button>` : ''}
@@ -727,7 +767,16 @@ function renderPosUserSelect() {
   </div>`;
 }
 
+function renderRegisterUnassigned() {
+  document.getElementById('main-root').innerHTML = `
+  <div class="pos-user-select">
+    <div class="pos-user-select-title">Dieses Gerät ist noch keiner Kasse zugeordnet</div>
+    <div class="register-unassigned-hint">Ein Admin legt in der Verwaltung unter „Kassen“ fest, welche Kasse dieses Gerät ist. Bis dahin kann hier nicht verkauft werden.</div>
+  </div>`;
+}
+
 function renderPos() {
+  if (multiRegister() && !state.register) return renderRegisterUnassigned();
   if (state.posUsers.length && !state.posUser) return renderPosUserSelect();
   const CATS_ORDER = ['Speisen', 'Getränke', 'Süßes'];
   const cats = ['Alle'].concat(
@@ -871,7 +920,7 @@ function renderPos() {
  * Rendering — Admin
  * ------------------------------------------------------------------- */
 function adminTabsList() {
-  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['deposit', 'Pfand'], ['comp', 'Ohne Berechnung'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
+  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['deposit', 'Pfand'], ['comp', 'Ohne Berechnung'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['registers', 'Kassen'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
   return tabs.filter((t) => t[0] !== 'stock' || state.settings.trackStock);
 }
 
@@ -892,7 +941,7 @@ function renderOverviewTab() {
   const rankMax = Math.max(1, ...a.ranking.map((r) => r.revenueCents));
   const allTotal = a.payments.cash.sumCents + a.payments.card.sumCents;
 
-  return `
+  return registerPicker('set-report-register', state.reportRegister, true) + `
     <div class="kpi-grid">${kpiCards.map((k) => `<div class="kpi-card"><div class="label">${esc(k.label)}</div><div class="value mono">${k.value}</div><div class="sub" style="color:${k.color}">${esc(k.sub)}</div></div>`).join('')}</div>
     <div class="chart-grid">
       <div class="chart-card">
@@ -994,7 +1043,7 @@ function renderUsersTab() {
   return `
     <div class="card-box">
       <div class="table-head-row" style="padding:0 0 12px">
-        <div><div class="title">Benutzer</div><div class="subtitle">Steuert, welche Artikel an welcher Kasse angezeigt werden</div></div>
+        <div><div class="title">Benutzer</div><div class="subtitle">Steuert, welche Artikel ein Benutzer verkaufen darf · welche Kasse ein Gerät ist, steht unter „Kassen“</div></div>
         <button data-action="new-user" class="btn-primary">+ Neuer Benutzer</button>
       </div>
       ${users.map((u) => {
@@ -1014,6 +1063,36 @@ function renderUsersTab() {
     </div>`;
 }
 
+function renderRegistersTab() {
+  const regs = state.admin.registers;
+  const cats = state.admin.categories;
+  if (!regs || !cats) return '<p>Lädt…</p>';
+  const deviceId = state.admin.deviceRegisterId;
+  return `
+    <div class="card-box">
+      <div class="table-head-row" style="padding:0 0 12px">
+        <div><div class="title">Kassen</div><div class="subtitle">Jede Kasse hat eigenen Kassenbestand, eigenes Journal und eigene Tagesabschlüsse · ${deviceId ? 'dieses Gerät ist ' + esc(registerName(deviceId)) : 'dieses Gerät ist noch keiner Kasse zugeordnet'}</div></div>
+        <button data-action="new-register" class="btn-primary">+ Neue Kasse</button>
+      </div>
+      ${regs.map((r) => {
+        const scope = r.categoryIds.length
+          ? r.categoryIds.map((id) => (cats.find((c) => c.id === id) || {}).name).filter(Boolean).join(', ')
+          : 'Alle Artikelgruppen';
+        const isDevice = r.id === deviceId;
+        return `<div class="settings-row" data-action="edit-register" data-id="${r.id}">
+          <div>
+            <div class="title">${esc(r.name)}${isDevice ? ' <span class="badge-admin">dieses Gerät</span>' : ''}</div>
+            <div class="hint">${esc(scope)} · ${r.saleCount} Bon(s)</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            ${isDevice ? '' : `<button data-action="assign-device-register" data-id="${r.id}" class="btn-neutral" style="padding:8px 12px;border-radius:9px;font-size:12.5px;font-weight:700">Diesem Gerät zuordnen</button>`}
+            ${regs.length > 1 && r.saleCount === 0 ? `<button data-action="delete-register" data-id="${r.id}" data-name="${esc(r.name)}" class="del">✕</button>` : ''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+
 function renderAnalyticsTab() {
   const groups = state.admin.groups;
   if (!groups) return '<p>Lädt…</p>';
@@ -1021,10 +1100,10 @@ function renderAnalyticsTab() {
     <div><div class="title">Auswertungen</div><div class="subtitle">Nach Artikelgruppe, seit Beginn</div></div>
     <button data-action="email-reports" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Per E-Mail senden</button>
   </div>`;
-  return header + (groups.map((g) => `
+  return registerPicker('set-report-register', state.reportRegister, true) + header + (groups.map((g) => `
     <div class="group-card">
       <div class="group-head" data-action="show-group" data-name="${esc(g.name)}"><span class="name">${esc(g.name)}</span><span class="revenue mono">${eur(g.revenueCents)}</span></div>
-      <div class="group-sub">${g.sharePct}% vom Gesamtumsatz · ${g.qty}× verkauft · ${g.count} Artikel</div>
+      <div class="group-sub">${g.sharePct}% vom Umsatz${state.reportRegister === 'all' ? '' : ' dieser Kasse'} · ${g.qty}× verkauft · ${g.count} Artikel</div>
       <div class="group-bar-bg"><div class="group-bar-fill" style="width:${Math.max(2, g.sharePct)}%;background:var(--accent)"></div></div>
       <div class="group-stats">
         <div class="group-stat"><div class="label">Rohertrag</div><div class="value" style="color:var(--accent)">${eur(g.profitCents)}</div></div>
@@ -1153,8 +1232,8 @@ function renderJournalTab() {
       <span class="journal-amount mono" style="color:${color}">${amount}</span>
     </div>`;
   }).join('');
-  return `<div class="table-card journal-card">
-    <div class="table-head-row"><div><div class="title">Kassenbewegungen</div><div class="subtitle">Bon antippen für Belegansicht</div></div>
+  return registerPicker('set-admin-register', state.adminRegisterId, false) + `<div class="table-card journal-card">
+    <div class="table-head-row"><div><div class="title">Kassenbewegungen${multiRegister() ? ' · ' + esc(registerName(state.adminRegisterId)) : ''}</div><div class="subtitle">Bon antippen für Belegansicht</div></div>
       <button data-action="email-journal" class="btn-neutral" style="padding:11px 16px;border-radius:10px;font-size:13px;font-weight:700">Per E-Mail senden</button>
     </div>
     <div class="journal-cols"><span>Datum</span><span>Typ</span><span>Vorgang</span><span>Notiz</span><span>Benutzer</span><span class="num">Betrag</span></div>
@@ -1167,9 +1246,9 @@ function renderCashTab() {
   const status = state.admin.cashStatus;
   const zReports = state.admin.zReports;
   if (!status || !zReports) return '<p>Lädt…</p>';
-  return `<div class="cash-grid">
+  return registerPicker('set-admin-register', state.adminRegisterId, false) + `<div class="cash-grid">
     <div class="card-box">
-      <div class="cash-balance-label">Kassenbestand jetzt</div>
+      <div class="cash-balance-label">Kassenbestand jetzt${multiRegister() ? ' · ' + esc(registerName(state.adminRegisterId)) : ''}</div>
       <div class="cash-balance-value mono">${eur(status.balanceCents)}</div>
       <div class="cash-since">Barumsatz seit Abschluss: ${eur(status.cashSinceCloseCents)}</div>
       <div class="cash-actions">
@@ -1186,7 +1265,7 @@ function renderCashTab() {
         <div class="z-list-item">
           <div class="z-list-top"><span>Z-${z.no} · ${new Date(z.closedAt).toLocaleDateString('de-DE')}</span><span class="mono">${eur(z.totalCents)}</span></div>
           <div class="z-list-detail">${z.salesCount} Bons · Bar ${eur(z.cashCents)} · Karte ${eur(z.cardCents)}
-            <button data-action="email-zreport" data-no="${z.no}" class="z-list-email-btn">Per E-Mail senden</button>
+            <button data-action="email-zreport" data-id="${z.id}" data-no="${z.no}" class="z-list-email-btn">Per E-Mail senden</button>
           </div>
         </div>`).join('')}
     </div>
@@ -1254,7 +1333,7 @@ function renderSettingsTab() {
 
 function renderAdmin() {
   const tabs = adminTabsList();
-  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', deposit: 'Pfand', comp: 'Ohne Berechnung', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
+  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', deposit: 'Pfand', comp: 'Ohne Berechnung', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', registers: 'Kassen', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
   let content = '';
   if (state.adminTab === 'overview') content = renderOverviewTab();
   else if (state.adminTab === 'analytics') content = renderAnalyticsTab();
@@ -1264,6 +1343,7 @@ function renderAdmin() {
   else if (state.adminTab === 'articles') content = renderArticlesTab();
   else if (state.adminTab === 'stock') content = renderStockTab();
   else if (state.adminTab === 'users') content = renderUsersTab();
+  else if (state.adminTab === 'registers') content = renderRegistersTab();
   else if (state.adminTab === 'journal') content = renderJournalTab();
   else if (state.adminTab === 'cash') content = renderCashTab();
   else if (state.adminTab === 'settings') content = renderSettingsTab();
@@ -1337,7 +1417,7 @@ function renderReceiptOverlay() {
   return `<div class="overlay" id="receipt-overlay">
     <div class="receipt-card">
       <div class="receipt-shop">${esc(state.shopName)}</div>
-      <div class="receipt-meta">${fmtDateTime(rc.soldAt)} · Bon ${esc(rc.receiptNo)}</div>
+      <div class="receipt-meta">${fmtDateTime(rc.soldAt)} · Bon ${esc(rc.receiptNo)}${multiRegister() && rc.registerName ? ' · ' + esc(rc.registerName) : ''}</div>
       ${rc.voidedAt ? `<div class="receipt-void"><div class="title">Storniert · ${fmtDateTime(rc.voidedAt)}</div><div>${esc(rc.voidReason || '')}</div></div>` : ''}
       <hr class="receipt-divider">
       ${rc.items.map((i) => `<div class="receipt-line"><span class="qty mono">${i.qty}×</span><span class="name">${esc(i.name)}</span><span class="mono">${eur(i.unitCents * i.qty)}</span></div>${i.depositCents ? `<div class="receipt-line" style="color:var(--text-3);font-size:11.5px"><span class="qty"></span><span class="name">davon Pfand ${i.qty}× ${eur(i.depositCents)}</span><span class="mono">${eur(i.depositCents * i.qty)}</span></div>` : ''}`).join('')}
@@ -1444,6 +1524,17 @@ function renderFormOverlay() {
         <div class="switch-track ${f.active ? 'on' : ''}"><div class="switch-knob"></div></div>
       </div>`;
     }
+    submitLabel = f.id ? 'Speichern' : 'Anlegen';
+  } else if (f.kind === 'register') {
+    title = f.id ? 'Kasse bearbeiten' : 'Neue Kasse';
+    const cats = state.admin.categories || [];
+    fields = F('Name', 'name', 'z. B. Kasse 2 · Merch');
+    fields += `<div class="form-field"><label>Verkauft diese Artikelgruppen</label>
+      <div class="checkbox-list">${cats.length
+        ? cats.map((c) => `<label class="checkbox-row"><input type="checkbox" data-action="toggle-form-category" data-cat-id="${c.id}" ${(f.categoryIds || []).includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('')
+        : '<div class="hint">Noch keine Artikelgruppe angelegt.</div>'}</div>
+    </div>`;
+    hint = 'Keine Gruppe angehakt = diese Kasse verkauft alle Artikel. Welche Kasse ein Gerät ist, legst du danach mit „Diesem Gerät zuordnen“ fest.';
     submitLabel = f.id ? 'Speichern' : 'Anlegen';
   } else if (f.kind === 'delivery') {
     title = 'Warenzugang · ' + f.name;
@@ -1674,6 +1765,36 @@ function onAction(e) {
         renderMain();
       },
     });
+    case 'set-admin-register': state.adminRegisterId = Number(d.id); return void enterAdminTab(state.adminTab);
+    case 'set-report-register': state.reportRegister = d.id === 'all' ? 'all' : Number(d.id); return void enterAdminTab(state.adminTab);
+    case 'new-register': return openForm({ kind: 'register', name: '', categoryIds: [] });
+    case 'edit-register': {
+      const r = (state.admin.registers || []).find((x) => x.id === Number(d.id));
+      if (!r) return;
+      return openForm({ kind: 'register', id: r.id, name: r.name, categoryIds: r.categoryIds.slice() });
+    }
+    case 'delete-register': return openForm({
+      kind: 'confirm', noCode: true, title: 'Kasse löschen · ' + d.name,
+      hint: 'Nur möglich, solange auf dieser Kasse noch nichts gebucht wurde.',
+      submitLabel: 'Kasse löschen',
+      action: async () => {
+        await api('/registers/' + d.id, { method: 'DELETE' });
+        showToast('Kasse gelöscht');
+        await Promise.all([loadBootstrap(), loadRegisters()]);
+        renderHeader(); renderMain();
+      },
+    });
+    case 'assign-device-register': return void guardedAdminCall(() => api('/device/register', { method: 'POST', body: { registerId: Number(d.id) } }))
+      .then(async (res) => {
+        if (!res) return;
+        // The cart may hold articles this Kasse doesn't sell — start clean.
+        state.cart = []; state.tender = 0; state.discount = 0; state.selected = null;
+        state.adminRegisterId = res.id;
+        showToast('Dieses Gerät ist jetzt ' + res.name);
+        await Promise.all([loadBootstrap(), loadRegisters()]);
+        renderHeader(); renderMain();
+      })
+      .catch((e) => showToast(e.message));
     case 'new-user': return openForm({ kind: 'user', name: '', role: 'cashier', pin: '', categoryIds: [], active: true });
     case 'edit-user': {
       const u = state.admin.users.find((x) => x.id === Number(d.id));
@@ -1737,20 +1858,20 @@ function onAction(e) {
     }
     case 'open-receipt': return void api('/receipts/' + d.no).then((rc) => { state.receipt = rc; renderOverlay(); }).catch((e) => showToast(e.message));
     case 'load-more-journal': return void loadJournal(state.admin.journalBefore).then(renderMain);
-    case 'email-journal': return void guardedAdminCall(() => api('/journal/email', { method: 'POST' }))
+    case 'email-journal': return void guardedAdminCall(() => api('/journal/email', { method: 'POST', body: { registerId: state.adminRegisterId } }))
       .then((res) => { if (res) showToast('Journal per E-Mail gesendet'); })
       .catch((e) => showToast(e.message));
-    case 'email-reports': return void guardedAdminCall(() => api('/reports/email', { method: 'POST' }))
+    case 'email-reports': return void guardedAdminCall(() => api('/reports/email', { method: 'POST', body: { registerId: state.reportRegister } }))
       .then((res) => { if (res) showToast('Auswertungen per E-Mail gesendet'); })
       .catch((e) => showToast(e.message));
-    case 'email-zreport': return void guardedAdminCall(() => api('/z-reports/' + d.no + '/email', { method: 'POST' }))
+    case 'email-zreport': return void guardedAdminCall(() => api('/z-reports/' + d.id + '/email', { method: 'POST' }))
       .then((res) => { if (res) showToast('Z-' + d.no + ' per E-Mail gesendet'); })
       .catch((e) => showToast(e.message));
     case 'open-cash-in': return openForm({ kind: 'in', amount: '', note: '' });
     case 'open-cash-out': return openForm({ kind: 'out', amount: '', note: '' });
     case 'add-deposit-return': return addDepositReturnToCart(Number(d.id));
-    case 'close-day': return void guardedAdminCall(() => api('/z-reports', { method: 'POST' }))
-      .then((res) => { if (!res) return; showToast('Z-' + res.no + ' gebucht · ' + eur(res.totalCents) + ' Umsatz'); return Promise.all([loadBootstrap(), loadCashStatus()]); })
+    case 'close-day': return void guardedAdminCall(() => api('/z-reports', { method: 'POST', body: { registerId: state.adminRegisterId } }))
+      .then((res) => { if (!res) return; showToast((multiRegister() ? registerName(state.adminRegisterId) + ' · ' : '') + 'Z-' + res.no + ' gebucht · ' + eur(res.totalCents) + ' Umsatz'); return Promise.all([loadBootstrap(), loadCashStatus()]); })
       .catch((e) => showToast(e.message))
       .then(() => { renderHeader(); renderMain(); });
     case 'toggle-setting': {

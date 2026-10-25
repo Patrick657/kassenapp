@@ -19,21 +19,54 @@ final class ReportsRepo
      */
     public const NET_CENTS = 'CAST(total_cents AS SIGNED) - CAST(deposit_returned_cents AS SIGNED)';
 
-    public function kpis(bool $trackStock): array
+    /**
+     * Every report takes an optional Kasse: null = Gesamt over all Kassen, an id = just that one.
+     * Returns the SQL fragment (for a sales table aliased as $alias, or unaliased) and its params.
+     * @return array{0:string, 1:array}
+     */
+    private static function registerFilter(?int $registerId, string $alias = ''): array
     {
-        $today = $this->db->query(
+        if ($registerId === null) {
+            return ['', []];
+        }
+        return [' AND ' . ($alias !== '' ? $alias . '.' : '') . 'register_id = ?', [$registerId]];
+    }
+
+    private function fetchOne(string $sql, array $params): array
+    {
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetch() ?: [];
+    }
+
+    private function fetchAllRows(string $sql, array $params): array
+    {
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    public function kpis(bool $trackStock, ?int $registerId = null): array
+    {
+        [$f, $p] = self::registerFilter($registerId);
+        [$fs, $ps] = self::registerFilter($registerId, 's');
+        $today = $this->fetchOne(
             "SELECT COUNT(*) AS cnt, COALESCE(SUM(" . self::NET_CENTS . "), 0) AS sum_cents
-             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND DATE(sold_at) = CURDATE()"
-        )->fetch();
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND DATE(sold_at) = CURDATE()" . $f,
+            $p
+        );
 
-        $total = $this->db->query(
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(" . self::NET_CENTS . "), 0) AS sum_cents FROM sales WHERE voided_at IS NULL AND payment <> 'comp'"
-        )->fetch();
+        $total = $this->fetchOne(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(" . self::NET_CENTS . "), 0) AS sum_cents FROM sales WHERE voided_at IS NULL AND payment <> 'comp'" . $f,
+            $p
+        );
 
-        $profit = $this->db->query(
+        $profitStmt = $this->db->prepare(
             "SELECT COALESCE(SUM(si.qty * (si.unit_cents - si.cost_cents)), 0)
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'"
-        )->fetchColumn();
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'" . $fs
+        );
+        $profitStmt->execute($ps);
+        $profit = $profitStmt->fetchColumn();
 
         $lowStockCount = 0;
         $lowStockNames = [];
@@ -47,7 +80,7 @@ final class ReportsRepo
             )->fetchColumn();
         }
 
-        $topProduct = $this->productsRanking(1);
+        $topProduct = $this->productsRanking(1, $registerId);
 
         return [
             'todayRevenueCents' => (int) $today['sum_cents'],
@@ -62,13 +95,15 @@ final class ReportsRepo
         ];
     }
 
-    public function daily(): array
+    public function daily(?int $registerId = null): array
     {
-        $rows = $this->db->query(
+        [$f, $p] = self::registerFilter($registerId);
+        $rows = $this->fetchAllRows(
             "SELECT DATE(sold_at) AS d, SUM(" . self::NET_CENTS . ") AS sum_cents
-             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND sold_at >= (CURDATE() - INTERVAL 6 DAY)
-             GROUP BY DATE(sold_at)"
-        )->fetchAll();
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND sold_at >= (CURDATE() - INTERVAL 6 DAY)" . $f . "
+             GROUP BY DATE(sold_at)",
+            $p
+        );
         $byDate = [];
         foreach ($rows as $r) {
             $byDate[$r['d']] = (int) $r['sum_cents'];
@@ -85,13 +120,15 @@ final class ReportsRepo
         return $out;
     }
 
-    public function hourly(): array
+    public function hourly(?int $registerId = null): array
     {
-        $rows = $this->db->query(
+        [$f, $p] = self::registerFilter($registerId);
+        $rows = $this->fetchAllRows(
             "SELECT HOUR(sold_at) AS h, SUM(" . self::NET_CENTS . ") AS sum_cents
-             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND HOUR(sold_at) BETWEEN 9 AND 23
-             GROUP BY HOUR(sold_at)"
-        )->fetchAll();
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND HOUR(sold_at) BETWEEN 9 AND 23" . $f . "
+             GROUP BY HOUR(sold_at)",
+            $p
+        );
         $byHour = [];
         foreach ($rows as $r) {
             $byHour[(int) $r['h']] = (int) $r['sum_cents'];
@@ -103,16 +140,17 @@ final class ReportsRepo
         return $out;
     }
 
-    public function productsRanking(int $limit = 7): array
+    public function productsRanking(int $limit = 7, ?int $registerId = null): array
     {
+        [$fs, $ps] = self::registerFilter($registerId, 's');
         $stmt = $this->db->prepare(
             "SELECT si.product_id, MAX(si.name) AS name, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS revenue_cents
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'" . $fs . "
              GROUP BY si.product_id
              ORDER BY revenue_cents DESC
              LIMIT " . max(1, $limit)
         );
-        $stmt->execute();
+        $stmt->execute($ps);
         return array_map(static fn ($r) => [
             'productId' => $r['product_id'] !== null ? (int) $r['product_id'] : null,
             'name' => $r['name'],
@@ -121,13 +159,15 @@ final class ReportsRepo
         ], $stmt->fetchAll());
     }
 
-    public function payments(): array
+    public function payments(?int $registerId = null): array
     {
-        $rows = $this->db->query(
+        [$f, $p] = self::registerFilter($registerId);
+        $rows = $this->fetchAllRows(
             "SELECT payment, COUNT(*) AS cnt, COALESCE(SUM(total_cents), 0) AS sum_cents,
                     COALESCE(SUM(deposit_returned_cents), 0) AS returned_cents
-             FROM sales WHERE voided_at IS NULL AND payment <> 'comp' GROUP BY payment"
-        )->fetchAll();
+             FROM sales WHERE voided_at IS NULL AND payment <> 'comp'" . $f . " GROUP BY payment",
+            $p
+        );
         $out = ['cash' => ['sumCents' => 0, 'count' => 0], 'card' => ['sumCents' => 0, 'count' => 0]];
         $returned = 0;
         foreach ($rows as $r) {
@@ -142,13 +182,19 @@ final class ReportsRepo
         return $out;
     }
 
-    public function groups(bool $trackStock): array
+    /**
+     * @param ?array $categoryNames when filtering on one Kasse that sells only certain article
+     *        groups: just those groups (plus any other group it did sell something from)
+     */
+    public function groups(bool $trackStock, ?int $registerId = null, ?array $categoryNames = null): array
     {
-        $soldRows = $this->db->query(
+        [$fs, $ps] = self::registerFilter($registerId, 's');
+        $soldRows = $this->fetchAllRows(
             "SELECT si.product_id, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS revenue_cents
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'
-             GROUP BY si.product_id"
-        )->fetchAll();
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment <> 'comp'" . $fs . "
+             GROUP BY si.product_id",
+            $ps
+        );
         $sold = [];
         foreach ($soldRows as $r) {
             if ($r['product_id'] !== null) {
@@ -163,6 +209,14 @@ final class ReportsRepo
         $byCategory = [];
         foreach ($products as $p) {
             $byCategory[$p['category']][] = $p;
+        }
+        if ($categoryNames !== null) {
+            $byCategory = array_filter(
+                $byCategory,
+                static fn ($items, $category) => in_array($category, $categoryNames, true)
+                    || array_sum(array_map(static fn ($p) => $sold[(int) $p['id']]['qty'] ?? 0, $items)) > 0,
+                ARRAY_FILTER_USE_BOTH
+            );
         }
 
         $groups = [];
@@ -218,19 +272,22 @@ final class ReportsRepo
      * name frozen on the booking, so a Bereich deleted since still shows up with its history.
      * These rows are excluded from every revenue figure above — this is the one place they count.
      */
-    public function comp(): array
+    public function comp(?int $registerId = null): array
     {
-        $totals = $this->db->query(
+        [$fs, $ps] = self::registerFilter($registerId, 's');
+        $totals = $this->fetchAllRows(
             "SELECT s.comp_name, COUNT(*) AS cnt, COALESCE(SUM(s.total_cents), 0) AS value_cents
-             FROM sales s WHERE s.voided_at IS NULL AND s.payment = 'comp'
-             GROUP BY s.comp_name ORDER BY value_cents DESC"
-        )->fetchAll();
-        $itemRows = $this->db->query(
+             FROM sales s WHERE s.voided_at IS NULL AND s.payment = 'comp'" . $fs . "
+             GROUP BY s.comp_name ORDER BY value_cents DESC",
+            $ps
+        );
+        $itemRows = $this->fetchAllRows(
             "SELECT s.comp_name, si.name, SUM(si.qty) AS qty, SUM(si.qty * si.unit_cents) AS value_cents,
                     SUM(si.qty * si.cost_cents) AS cost_cents
-             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment = 'comp'
-             GROUP BY s.comp_name, si.name ORDER BY value_cents DESC"
-        )->fetchAll();
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id AND s.voided_at IS NULL AND s.payment = 'comp'" . $fs . "
+             GROUP BY s.comp_name, si.name ORDER BY value_cents DESC",
+            $ps
+        );
         $items = [];
         $cost = [];
         foreach ($itemRows as $r) {

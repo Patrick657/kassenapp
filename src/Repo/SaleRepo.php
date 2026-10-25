@@ -35,8 +35,9 @@ final class SaleRepo
      *        payment 'comp', an "ohne Berechnung" booking: the goods are recorded with their
      *        normal value and leave stock, but nothing is collected, no Pfand is charged and the
      *        drawer isn't touched. Every revenue figure excludes these rows (payment <> 'comp').
+     * @param int $registerId the Kasse this checkout belongs to — its drawer, journal and Z-Bericht
      */
-    public function create(array $items, int $discountCents, string $payment, int $givenCents, bool $trackStock, ?string $clientUuid, array $returnLines = [], ?array $compAccount = null): array
+    public function create(int $registerId, array $items, int $discountCents, string $payment, int $givenCents, bool $trackStock, ?string $clientUuid, array $returnLines = [], ?array $compAccount = null): array
     {
         if (empty($items) && empty($returnLines)) {
             throw new ApiException(400, 'Warenkorb ist leer');
@@ -131,12 +132,12 @@ final class SaleRepo
         $this->db->beginTransaction();
         try {
             $stmt = $this->db->prepare(
-                'INSERT INTO sales (client_uuid, receipt_no, sold_at, subtotal_cents, discount_cents, deposit_cents, deposit_returned_cents, total_cents, payment, comp_account_id, comp_name, given_cents, change_cents)
-                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO sales (client_uuid, receipt_no, sold_at, subtotal_cents, discount_cents, deposit_cents, deposit_returned_cents, total_cents, payment, register_id, comp_account_id, comp_name, given_cents, change_cents)
+                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             // receipt_no is finalized below once we have the id; store a temporary unique placeholder first.
             $placeholder = 'TMP-' . bin2hex(random_bytes(8));
-            $stmt->execute([$clientUuid, $placeholder, $subtotal, $discount, $depositTotal, $returnedCents, $grossTotal, $payment, $isComp ? (int) $compAccount['id'] : null, $isComp ? (string) $compAccount['name'] : null, $given, $change]);
+            $stmt->execute([$clientUuid, $placeholder, $subtotal, $discount, $depositTotal, $returnedCents, $grossTotal, $payment, $registerId, $isComp ? (int) $compAccount['id'] : null, $isComp ? (string) $compAccount['name'] : null, $given, $change]);
             $saleId = (int) $this->db->lastInsertId();
             $receiptNo = Support::receiptNo($saleId);
             $this->db->prepare('UPDATE sales SET receipt_no = ? WHERE id = ?')->execute([$receiptNo, $saleId]);
@@ -153,20 +154,20 @@ final class SaleRepo
                 }
                 if ($isComp) {
                     $note = count($resolved) . ' Position(en) · Ohne Berechnung · ' . $compAccount['name'];
-                    $this->cash->insert('comp', 0, $note, $saleId);
+                    $this->cash->insert($registerId, 'comp', 0, $note, $saleId);
                 } else {
                     $note = count($resolved) . ' Position(en) · ' . ($payment === 'cash' ? 'Bar' : 'Karte');
-                    $this->cash->insert('sale', $payment === 'cash' ? $grossTotal : 0, $note, $saleId);
+                    $this->cash->insert($registerId, 'sale', $payment === 'cash' ? $grossTotal : 0, $note, $saleId);
                 }
             }
 
             foreach ($returnLines as $r) {
                 $amount = (int) $r['depositType']['amount_cents'] * (int) $r['qty'];
-                if ($amount > $this->cash->balanceCents()) {
+                if ($amount > $this->cash->balanceCents($registerId)) {
                     throw new ApiException(400, 'Mehr als der Kassenbestand');
                 }
                 $note = 'Pfandrückgabe ' . $r['qty'] . '× ' . $r['depositType']['name'];
-                $this->cash->insert('deposit_return', -$amount, $note, $saleId, null, (int) $r['qty'], (int) $r['depositType']['id']);
+                $this->cash->insert($registerId, 'deposit_return', -$amount, $note, $saleId, null, (int) $r['qty'], (int) $r['depositType']['id']);
             }
 
             $this->db->commit();
@@ -179,7 +180,8 @@ final class SaleRepo
     }
 
     /**
-     * Storno of a whole Bon. Only Bons of the still-open day can be voided: a Bon that's already
+     * Storno of a whole Bon, booked back into the Kasse the Bon belongs to (not the device's).
+     * Only Bons of that Kasse's still-open day can be voided: a Bon that's already
      * in a Z-Bericht is part of a closed, emailed report and its cash has left the drawer, so
      * voiding it would silently change that report after the fact.
      *
@@ -208,7 +210,8 @@ final class SaleRepo
             if ($sale['voided_at'] !== null) {
                 throw new ApiException(409, 'Bon ist bereits storniert');
             }
-            $lastCloseAt = $this->cash->lastCloseOccurredAt();
+            $registerId = (int) $sale['register_id'];
+            $lastCloseAt = $this->cash->lastCloseOccurredAt($registerId);
             if ($lastCloseAt !== null && $sale['sold_at'] <= $lastCloseAt) {
                 throw new ApiException(409, 'Bon ist bereits im Tagesabschluss enthalten und kann nicht mehr storniert werden');
             }
@@ -219,7 +222,7 @@ final class SaleRepo
             );
             $movedStmt->execute([$saleId]);
             $reversal = -(int) $movedStmt->fetchColumn();
-            if ($reversal < 0 && -$reversal > $this->cash->balanceCents()) {
+            if ($reversal < 0 && -$reversal > $this->cash->balanceCents($registerId)) {
                 throw new ApiException(400, 'Nicht genug Bargeld in der Kasse für dieses Storno');
             }
 
@@ -236,7 +239,7 @@ final class SaleRepo
                 }
             }
 
-            $this->cash->insert('void', $reversal, 'Storno · ' . $reason, $saleId);
+            $this->cash->insert($registerId, 'void', $reversal, 'Storno · ' . $reason, $saleId);
 
             $this->db->commit();
         } catch (\Throwable $e) {
@@ -249,13 +252,13 @@ final class SaleRepo
 
     public function receipt(int $saleId): array
     {
-        $stmt = $this->db->prepare('SELECT * FROM sales WHERE id = ?');
+        $stmt = $this->db->prepare('SELECT s.*, r.name AS register_name FROM sales s LEFT JOIN registers r ON r.id = s.register_id WHERE s.id = ?');
         $stmt->execute([$saleId]);
         $sale = $stmt->fetch();
         if (!$sale) {
             throw new ApiException(404, 'Bon nicht gefunden');
         }
-        $lastCloseAt = $this->cash->lastCloseOccurredAt();
+        $lastCloseAt = $this->cash->lastCloseOccurredAt((int) $sale['register_id']);
         $voidable = $sale['voided_at'] === null && ($lastCloseAt === null || $sale['sold_at'] > $lastCloseAt);
         $itemStmt = $this->db->prepare('SELECT product_id, name, unit_cents, deposit_cents, qty FROM sale_items WHERE sale_id = ?');
         $itemStmt->execute([$saleId]);
@@ -271,6 +274,8 @@ final class SaleRepo
 
         return [
             'receiptNo' => $sale['receipt_no'],
+            'registerId' => (int) $sale['register_id'],
+            'registerName' => $sale['register_name'],
             'soldAt' => Support::toIso($sale['sold_at']),
             'items' => array_map(static fn ($i) => [
                 'productId' => $i['product_id'] !== null ? (int) $i['product_id'] : null,

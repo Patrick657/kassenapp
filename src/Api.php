@@ -11,6 +11,7 @@ use Festkasse\Repo\DepositTypeRepo;
 use Festkasse\Repo\JournalRepo;
 use Festkasse\Repo\MaintenanceRepo;
 use Festkasse\Repo\ProductRepo;
+use Festkasse\Repo\RegisterRepo;
 use Festkasse\Repo\ReportsRepo;
 use Festkasse\Repo\SaleRepo;
 use Festkasse\Repo\SettingsRepo;
@@ -34,10 +35,16 @@ final class Api
     private AuditRepo $audit;
     private MaintenanceRepo $maintenance;
     private UserRepo $users;
+    private RegisterRepo $registers;
     private Mailer $mailer;
 
+    /** The Kasse this device is bound to (see RegisterRepo::forDevice()), null if unassigned. */
+    private ?array $deviceRegister = null;
+
+    private const REGISTER_COOKIE = 'festkasse_register';
+
     /** @param array{host:string,port:int,encryption:string,user:string,pass:string,fromEmail:string,fromName:string} $smtp */
-    public function __construct(private readonly PDO $db, bool $https, array $smtp)
+    public function __construct(private readonly PDO $db, private readonly bool $https, array $smtp)
     {
         $this->auth = new Auth($db, $https);
         $this->settings = new SettingsRepo($db);
@@ -53,6 +60,7 @@ final class Api
         $this->audit = new AuditRepo($db);
         $this->maintenance = new MaintenanceRepo($db);
         $this->users = new UserRepo($db);
+        $this->registers = new RegisterRepo($db);
         $this->mailer = Mailer::fromConfig($smtp);
     }
 
@@ -70,6 +78,12 @@ final class Api
             } catch (\Throwable $e) {
                 error_log('[Festkasse API] Benutzer für Journal nicht ermittelbar: ' . $e->getMessage());
             }
+            try {
+                $cookie = $_COOKIE[self::REGISTER_COOKIE] ?? null;
+                $this->deviceRegister = $this->registers->forDevice(ctype_digit((string) $cookie) ? (int) $cookie : null);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse API] Kasse des Geräts nicht ermittelbar: ' . $e->getMessage());
+            }
             $result = $this->route($method, $path);
             Support::sendJson($result ?? ['ok' => true]);
         } catch (ApiException $e) {
@@ -78,6 +92,45 @@ final class Api
             error_log('[Festkasse API] ' . $e->getMessage());
             Support::sendJson(['error' => 'Interner Fehler'], 500);
         }
+    }
+
+    /** The device's Kasse, required for anything booked at the POS itself. */
+    private function requireDeviceRegister(): array
+    {
+        if ($this->deviceRegister === null) {
+            throw new ApiException(409, 'Dieses Gerät ist keiner Kasse zugeordnet · Admin: Verwaltung → Kassen');
+        }
+        return $this->deviceRegister;
+    }
+
+    /**
+     * Kasse picked in Verwaltung (Journal, Kasse, Abschlüsse): the given id, else this device's
+     * Kasse, else the first one — Verwaltung must keep working on a not-yet-assigned device.
+     */
+    private function registerFrom(mixed $raw): array
+    {
+        if ($raw !== null && $raw !== '' && $raw !== 'all') {
+            $register = $this->registers->find((int) $raw);
+            if ($register === null) {
+                throw new ApiException(404, 'Kasse nicht gefunden');
+            }
+            return $register;
+        }
+        $register = $this->deviceRegister ?? $this->registers->first();
+        if ($register === null) {
+            throw new ApiException(500, 'Keine Kasse angelegt');
+        }
+        return $register;
+    }
+
+    /** Report filter: null = Gesamt (all Kassen), otherwise one Kasse's id. */
+    private function reportRegisterId(): ?int
+    {
+        $raw = $_GET['registerId'] ?? null;
+        if ($raw === null || $raw === '' || $raw === 'all') {
+            return null;
+        }
+        return $this->registerFrom($raw)['id'];
     }
 
     private function route(string $method, string $path): mixed
@@ -123,6 +176,55 @@ final class Api
         if ($method === 'POST' && $path === '/api/pos/logout') {
             $this->auth->posLogout();
             return ['ok' => true];
+        }
+
+        if ($path === '/api/registers') {
+            $this->auth->requireAccess();
+            if ($method === 'GET') {
+                return ['registers' => $this->registers->list(), 'deviceRegisterId' => $this->deviceRegister['id'] ?? null];
+            }
+            if ($method === 'POST') {
+                $b = Support::jsonBody();
+                $id = $this->registers->create((string) ($b['name'] ?? ''), (array) ($b['categoryIds'] ?? []));
+                $this->audit->log('register.create', 'Kasse angelegt: ' . (string) ($b['name'] ?? ''));
+                return ['id' => $id];
+            }
+        }
+
+        if (preg_match('#^/api/registers/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            $this->auth->requireAccess();
+            if ($method === 'PATCH') {
+                $b = Support::jsonBody();
+                $this->registers->update($id, (string) ($b['name'] ?? ''), (array) ($b['categoryIds'] ?? []));
+                return ['ok' => true];
+            }
+            if ($method === 'DELETE') {
+                $register = $this->registers->find($id);
+                $this->registers->delete($id);
+                $this->audit->log('register.delete', 'Kasse gelöscht: ' . ($register['name'] ?? $id));
+                return ['ok' => true];
+            }
+        }
+
+        // Binds this device to a Kasse — only an admin may, so a cashier can't move their bookings
+        // into another stand's drawer. httponly: page scripts can't change it either.
+        if ($method === 'POST' && $path === '/api/device/register') {
+            $this->auth->requireAccess();
+            $b = Support::jsonBody();
+            $register = $this->registers->find((int) ($b['registerId'] ?? 0));
+            if ($register === null) {
+                throw new ApiException(404, 'Kasse nicht gefunden');
+            }
+            setcookie(self::REGISTER_COOKIE, (string) $register['id'], [
+                'expires' => time() + 60 * 60 * 24 * 365 * 5,
+                'path' => '/',
+                'httponly' => true,
+                'secure' => $this->https,
+                'samesite' => 'Strict',
+            ]);
+            $this->audit->log('device.register', 'Gerät zugeordnet: ' . $register['name']);
+            return $register;
         }
 
         if ($path === '/api/users') {
@@ -328,12 +430,15 @@ final class Api
 
         if ($method === 'POST' && $path === '/api/z-reports') {
             $this->auth->requireAccess();
-            return $this->zReports->close();
+            $register = $this->registerFrom(Support::jsonBody()['registerId'] ?? null);
+            $result = $this->zReports->close($register['id']);
+            $this->audit->log('zreport.close', $register['name'] . ' · Z-' . $result['no']);
+            return $result;
         }
 
         if ($method === 'GET' && $path === '/api/z-reports') {
             $this->auth->requireAccess();
-            return $this->zReports->list();
+            return $this->zReports->list($this->registerFrom($_GET['registerId'] ?? null)['id']);
         }
 
         if ($method === 'POST' && preg_match('#^/api/z-reports/(\d+)/email$#', $path, $m)) {
@@ -343,10 +448,12 @@ final class Api
 
         if ($method === 'GET' && $path === '/api/cash/status') {
             $this->auth->requireAccess();
-            $sinceAt = $this->cash->lastCloseOccurredAt();
+            $registerId = $this->registerFrom($_GET['registerId'] ?? null)['id'];
+            $sinceAt = $this->cash->lastCloseOccurredAt($registerId);
             return [
-                'balanceCents' => $this->cash->balanceCents(),
-                'cashSinceCloseCents' => $this->cash->cashRevenueSince($sinceAt),
+                'registerId' => $registerId,
+                'balanceCents' => $this->cash->balanceCents($registerId),
+                'cashSinceCloseCents' => $this->cash->cashRevenueSince($registerId, $sinceAt),
             ];
         }
 
@@ -369,7 +476,7 @@ final class Api
             $this->auth->requireAccess();
             $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : 80;
             $before = isset($_GET['before']) ? (int) $_GET['before'] : null;
-            return $this->journal->page($limit, $before);
+            return $this->journal->page($this->registerFrom($_GET['registerId'] ?? null)['id'], $limit, $before);
         }
 
         if ($method === 'POST' && $path === '/api/journal/email') {
@@ -414,7 +521,8 @@ final class Api
     private function bootstrap(): array
     {
         $settings = $this->settings->forClient();
-        $allowedCategories = $this->auth->posAllowedCategories(); // null = unrestricted (admin or feature unused)
+        $register = $this->deviceRegister;
+        $allowedCategories = $this->allowedCategoriesHere();
         $active = $this->products->listActive();
         if ($allowedCategories !== null) {
             $active = array_values(array_filter($active, static fn ($p) => in_array($p['category'], $allowedCategories, true)));
@@ -430,9 +538,15 @@ final class Api
             'trackStock' => (bool) $p['track_stock'],
         ], $active);
 
-        $today = (int) $this->db->query(
-"SELECT COALESCE(SUM(" . ReportsRepo::NET_CENTS . "), 0) FROM sales WHERE voided_at IS NULL AND payment <> 'comp' AND DATE(sold_at) = CURDATE()"
-        )->fetchColumn();
+        $today = 0;
+        if ($register !== null) {
+            $stmt = $this->db->prepare(
+                "SELECT COALESCE(SUM(" . ReportsRepo::NET_CENTS . "), 0) FROM sales
+                 WHERE voided_at IS NULL AND payment <> 'comp' AND DATE(sold_at) = CURDATE() AND register_id = ?"
+            );
+            $stmt->execute([$register['id']]);
+            $today = (int) $stmt->fetchColumn();
+        }
 
         return [
             'shopName' => $settings['shopName'],
@@ -444,12 +558,33 @@ final class Api
                 static fn ($c) => ['id' => $c['id'], 'name' => $c['name']],
                 $this->compAccounts->list()
             ),
-            'cashBalanceCents' => $this->cash->balanceCents(),
+            'cashBalanceCents' => $register !== null ? $this->cash->balanceCents($register['id']) : 0,
             'todayRevenueCents' => $today,
+            // This device's Kasse (null = several exist and it isn't assigned yet: POS can't sell),
+            // plus all Kassen by name for the Verwaltung pickers.
+            'register' => $register,
+            'registers' => array_map(static fn ($r) => ['id' => $r['id'], 'name' => $r['name']], $this->registers->list()),
             'access' => $this->auth->status(),
             'posUsers' => $this->auth->posUsers(),
             'posUser' => $this->auth->posCurrentUser(),
         ];
+    }
+
+    /**
+     * Article groups sellable on this device right now: the logged-in cashier's groups,
+     * intersected with this Kasse's groups. null = no restriction from either side.
+     */
+    private function allowedCategoriesHere(): ?array
+    {
+        $byUser = $this->auth->posAllowedCategories();
+        $byRegister = $this->deviceRegister !== null ? $this->registers->categoryNames($this->deviceRegister['id']) : null;
+        if ($byUser === null) {
+            return $byRegister;
+        }
+        if ($byRegister === null) {
+            return $byUser;
+        }
+        return array_values(array_intersect($byUser, $byRegister));
     }
 
     private function updateUser(int $id): array
@@ -725,7 +860,10 @@ final class Api
         }
         $this->products->addStock($productId, $qty);
         $note = 'Warenzugang ' . $qty . '× ' . $product['name'] . (!empty($b['note']) ? ' · ' . $b['note'] : '');
-        $this->cash->insert('delivery', 0, $note, null, $productId, $qty);
+        // Stock is shared, but the journal entry goes to the Kasse that sells this article group
+        // (if exactly one does) — a Merch delivery belongs in the Merch-Kasse's journal.
+        $registerId = $this->registers->soleRegisterForCategory((string) $product['category']) ?? $this->registerFrom(null)['id'];
+        $this->cash->insert($registerId, 'delivery', 0, $note, null, $productId, $qty);
         return ['ok' => true];
     }
 
@@ -740,16 +878,18 @@ final class Api
         if ($amount <= 0) {
             throw new ApiException(400, 'Betrag muss größer als 0 sein');
         }
-        if ($type === 'out' && $amount > $this->cash->balanceCents()) {
+        $registerId = $this->registerFrom($b['registerId'] ?? null)['id'];
+        if ($type === 'out' && $amount > $this->cash->balanceCents($registerId)) {
             throw new ApiException(400, 'Mehr als der Kassenbestand');
         }
         $note = trim((string) ($b['note'] ?? '')) ?: ($type === 'in' ? 'Einlage' : 'Entnahme');
-        $this->cash->insert($type, $type === 'out' ? -$amount : $amount, $note);
+        $this->cash->insert($registerId, $type, $type === 'out' ? -$amount : $amount, $note);
         return ['ok' => true];
     }
 
     private function createSale(): array
     {
+        $register = $this->requireDeviceRegister();
         $b = Support::jsonBody();
         $clientUuid = isset($b['clientUuid']) ? (string) $b['clientUuid'] : null;
         if ($clientUuid) {
@@ -767,7 +907,7 @@ final class Api
                 'qty' => (int) ($item['qty'] ?? 0),
             ];
         }
-        $allowedCategories = $this->auth->posAllowedCategories();
+        $allowedCategories = $this->allowedCategoriesHere();
         if ($allowedCategories !== null) {
             foreach ($items as $item) {
                 if ($item['productId'] === null) {
@@ -775,7 +915,7 @@ final class Api
                 }
                 $product = $this->products->find($item['productId']);
                 if ($product === null || !in_array($product['category'], $allowedCategories, true)) {
-                    throw new ApiException(403, 'Artikel außerhalb des Benutzerbereichs · bitte Benutzer wechseln');
+                    throw new ApiException(403, 'Artikel wird an dieser Kasse bzw. von diesem Benutzer nicht verkauft');
                 }
             }
         }
@@ -806,6 +946,7 @@ final class Api
 
         $trackStock = $this->settings->bool('track_stock', true);
         return $this->sales->create(
+            $register['id'],
             $items,
             (int) ($b['discountCents'] ?? 0),
             $payment,
@@ -819,14 +960,16 @@ final class Api
 
     private function report(string $kind): array
     {
+        $registerId = $this->reportRegisterId();
+        $trackStock = $this->settings->bool('track_stock', true);
         return match ($kind) {
-            'kpis' => $this->reports->kpis($this->settings->bool('track_stock', true)),
-            'daily' => $this->reports->daily(),
-            'hourly' => $this->reports->hourly(),
-            'products' => $this->reports->productsRanking(7),
-            'payments' => $this->reports->payments(),
-            'groups' => $this->reports->groups($this->settings->bool('track_stock', true)),
-            'comp' => $this->reports->comp(),
+            'kpis' => $this->reports->kpis($trackStock, $registerId),
+            'daily' => $this->reports->daily($registerId),
+            'hourly' => $this->reports->hourly($registerId),
+            'products' => $this->reports->productsRanking(7, $registerId),
+            'payments' => $this->reports->payments($registerId),
+            'groups' => $this->reports->groups($trackStock, $registerId, $registerId !== null ? $this->registers->categoryNames($registerId) : null),
+            'comp' => $this->reports->comp($registerId),
             default => throw new ApiException(404, 'Unbekannter Report'),
         };
     }
@@ -850,11 +993,13 @@ final class Api
     private function emailJournal(): array
     {
         $to = $this->reportRecipientsOrFail();
-        $rows = $this->journal->exportRows();
+        $register = $this->registerFrom(Support::jsonBody()['registerId'] ?? null);
+        $rows = $this->journal->exportRows($register['id']);
         $shopName = $this->settings->forClient()['shopName'];
+        $title = $shopName . ' · ' . $register['name'];
 
-        $balance = $this->cash->balanceCents();
-        $pdf = new Pdf($shopName . ' · Journal');
+        $balance = $this->cash->balanceCents($register['id']);
+        $pdf = new Pdf($title . ' · Journal');
         $pdf->addBanner(
             [
                 ['text' => 'Kassenbestand aktuell: ' . Support::eur($balance), 'bold' => true, 'size' => 13.0],
@@ -872,6 +1017,9 @@ final class Api
             $type = self::JOURNAL_TAG_TEXT[$r['type']] ?? $r['type'];
             if ($r['type'] === 'comp' && !empty($r['compName'])) {
                 $type .= ' (' . $r['compName'] . ')';
+            }
+            if (!empty($r['saleVoided']) && $r['type'] !== 'void') {
+                $type .= ' (storniert)';
             }
             $amount = $r['type'] === 'delivery' ? '–' : Support::eur($r['amountCents']);
             $color = $r['type'] === 'delivery' ? null : ($r['amountCents'] > 0 ? Pdf::GREEN : ($r['amountCents'] < 0 ? Pdf::RED : null));
@@ -893,14 +1041,14 @@ final class Api
             $pdf->addLine('Noch keine Kassenbewegungen.');
         }
 
-        $filename = 'Journal-' . date('Y-m-d') . '.pdf';
+        $filename = 'Journal-' . self::fileSafe($register['name']) . '-' . date('Y-m-d') . '.pdf';
         $this->mailer->send(
             $to,
-            $shopName . ' · Journal (' . date('d.m.Y') . ')',
-            'Anbei das Journal (Kassenbuch) mit ' . count($rows) . " Eintrag(en).\n\n" . $shopName,
+            $title . ' · Journal (' . date('d.m.Y') . ')',
+            'Anbei das Journal (Kassenbuch) von ' . $register['name'] . ' mit ' . count($rows) . " Eintrag(en).\n\n" . $shopName,
             [['filename' => $filename, 'mime' => 'application/pdf', 'content' => $pdf->output()]]
         );
-        $this->audit->log('journal.email', 'Journal per E-Mail an ' . implode(', ', $to));
+        $this->audit->log('journal.email', 'Journal ' . $register['name'] . ' per E-Mail an ' . implode(', ', $to));
         return ['ok' => true];
     }
 
@@ -909,13 +1057,16 @@ final class Api
         $to = $this->reportRecipientsOrFail();
         $trackStock = $this->settings->bool('track_stock', true);
         $shopName = $this->settings->forClient()['shopName'];
-        $kpis = $this->reports->kpis($trackStock);
-        $daily = $this->reports->daily();
-        $ranking = $this->reports->productsRanking(10);
-        $payments = $this->reports->payments();
-        $groups = $this->reports->groups($trackStock);
+        $rawRegister = Support::jsonBody()['registerId'] ?? null;
+        $registerId = ($rawRegister === null || $rawRegister === '' || $rawRegister === 'all') ? null : $this->registerFrom($rawRegister)['id'];
+        $scope = $registerId === null ? 'Alle Kassen' : $this->registers->find($registerId)['name'];
+        $kpis = $this->reports->kpis($trackStock, $registerId);
+        $daily = $this->reports->daily($registerId);
+        $ranking = $this->reports->productsRanking(10, $registerId);
+        $payments = $this->reports->payments($registerId);
+        $groups = $this->reports->groups($trackStock, $registerId, $registerId !== null ? $this->registers->categoryNames($registerId) : null);
 
-        $pdf = new Pdf($shopName . ' · Auswertungen');
+        $pdf = new Pdf($shopName . ' · Auswertungen · ' . $scope);
         $pdf->addBanner(
             [
                 ['text' => 'Umsatz gesamt: ' . Support::eur($kpis['totalRevenueCents']), 'bold' => true, 'size' => 13.0],
@@ -959,7 +1110,7 @@ final class Api
             );
         }
 
-        $comp = $this->reports->comp();
+        $comp = $this->reports->comp($registerId);
         if (!empty($comp)) {
             $pdf->addSpacer();
             $pdf->addLine('Ohne Berechnung (nicht im Umsatz enthalten)', true);
@@ -975,25 +1126,25 @@ final class Api
             }
         }
 
-        $filename = 'Auswertungen-' . date('Y-m-d') . '.pdf';
+        $filename = 'Auswertungen-' . self::fileSafe($scope) . '-' . date('Y-m-d') . '.pdf';
         $this->mailer->send(
             $to,
-            $shopName . ' · Auswertungen (' . date('d.m.Y') . ')',
-            "Anbei die aktuellen Auswertungen.\n\n" . $shopName,
+            $shopName . ' · Auswertungen ' . $scope . ' (' . date('d.m.Y') . ')',
+            'Anbei die aktuellen Auswertungen (' . $scope . ").\n\n" . $shopName,
             [['filename' => $filename, 'mime' => 'application/pdf', 'content' => $pdf->output()]]
         );
-        $this->audit->log('reports.email', 'Auswertungen per E-Mail an ' . implode(', ', $to));
+        $this->audit->log('reports.email', 'Auswertungen (' . $scope . ') per E-Mail an ' . implode(', ', $to));
         return ['ok' => true];
     }
 
-    private function emailZReport(int $no): array
+    private function emailZReport(int $id): array
     {
         $to = $this->reportRecipientsOrFail();
-        $z = $this->zReports->find($no);
+        $z = $this->zReports->find($id);
         if ($z === null) {
             throw new ApiException(404, 'Abschluss nicht gefunden');
         }
-        $shopName = $this->settings->forClient()['shopName'];
+        $shopName = $this->settings->forClient()['shopName'] . ' · ' . ($z['registerName'] ?? 'Kasse');
 
         $period = 'Abgeschlossen ' . (new \DateTime($z['closedAt']))->format('d.m.Y H:i') . ' Uhr';
         if ($z['fromSaleAt'] !== null) {
@@ -1011,7 +1162,7 @@ final class Api
         $pdf->addLine('Bar aus der Kasse entnommen: ' . Support::eur($z['drawerCents']));
         $pdf->addSpacer();
 
-        $sales = $this->zReports->salesFor($z['no']);
+        $sales = $this->zReports->salesFor($z['id']);
         $pdf->addLine('Verkäufe', true);
         $pdf->addSplitLine(
             Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Zahlung', 10),
@@ -1033,7 +1184,7 @@ final class Api
             $pdf->addLine('Keine Verkäufe in diesem Zeitraum.');
         }
 
-        $comp = $this->zReports->compFor($z['no']);
+        $comp = $this->zReports->compFor($z['id']);
         if (!empty($comp)) {
             $pdf->addSpacer();
             $pdf->addLine('Ohne Berechnung (nicht im Umsatz enthalten)', true);
@@ -1042,15 +1193,20 @@ final class Api
             }
         }
 
-        $filename = 'Z-Bericht-' . $z['no'] . '.pdf';
+        $filename = 'Z-Bericht-' . self::fileSafe((string) $z['registerName']) . '-' . $z['no'] . '.pdf';
         $this->mailer->send(
             $to,
             $shopName . ' · Tagesabschluss Z-' . $z['no'],
             'Anbei der Tagesabschluss Z-' . $z['no'] . ".\n\n" . $shopName,
             [['filename' => $filename, 'mime' => 'application/pdf', 'content' => $pdf->output()]]
         );
-        $this->audit->log('zreport.email', 'Z-' . $z['no'] . ' per E-Mail an ' . implode(', ', $to));
+        $this->audit->log('zreport.email', $shopName . ' Z-' . $z['no'] . ' per E-Mail an ' . implode(', ', $to));
         return ['ok' => true];
+    }
+
+    private static function fileSafe(string $name): string
+    {
+        return trim((string) preg_replace('/[^A-Za-z0-9]+/', '-', $name), '-') ?: 'Kasse';
     }
 
     private function updateCodes(): array
