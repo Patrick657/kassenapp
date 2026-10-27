@@ -24,7 +24,12 @@ if (str_starts_with($path, '/api/')) {
     exit;
 }
 
+// Cache busting: the asset URLs carry a short hash of their content, so after every deploy each
+// device loads the new app.js/styles.css instead of a stale browser copy — no manual cache clearing.
+$assetVersion = static fn (string $file): string => substr(hash_file('crc32b', __DIR__ . '/' . $file) ?: '0', 0, 8);
+
 header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-cache');
 ?><!DOCTYPE html>
 <html lang="de">
 <head>
@@ -42,10 +47,10 @@ header('Content-Type: text/html; charset=utf-8');
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/styles.css?v=<?= $assetVersion('styles.css') ?>">
 </head>
 <body>
 <div id="app">Lädt…</div>
-<script src="/app.js"></script>
+<script src="/app.js?v=<?= $assetVersion('app.js') ?>"></script>
 </body>
 </html>

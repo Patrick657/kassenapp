@@ -461,6 +461,9 @@ No App Store, no Xcode, no Apple Developer account — this is a standard instal
   network-first with a cache fallback — instant reloads, and it still opens if the festival wifi
   drops for a moment. `/api/*` is explicitly never intercepted: sales, stock, and reports always
   need a live network round-trip, caching those would be actively wrong.
+- **No manual cache clearing after a deploy**: `index.php` loads `app.js`/`styles.css` with
+  `?v=<content hash>`, so every deploy changes their URLs and each device picks up the new version
+  on its next page load. The HTML itself is sent with `Cache-Control: no-cache`.
 - `env(safe-area-inset-*)` padding on `#app` keeps the checkout footer clear of the home-indicator
   gesture strip current iPads reserve at the bottom when running installed, without affecting
   normal in-Safari use (insets are `0` there).
