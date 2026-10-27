@@ -446,6 +446,23 @@ within that capped height; the footer stays pinned below it. Also switched `100v
 (`#app`, modal `max-height`s) throughout, since plain `vh` is fixed to the tallest possible
 viewport and doesn't account for mobile Safari's collapsing address bar.
 
+## PDF-Gestaltung (Logo, Farbe, Schrift)
+
+Verwaltung → Einstellungen → **PDF-Gestaltung** applies to all PDFs (Journal, Auswertungen,
+Z-Bericht, Abrechnung auf Rechnung):
+
+- **Logo**: uploaded as PNG/JPG/GIF/WebP, stored as a JPEG of at most 600 px (flattened on white)
+  in `settings.pdf_logo` (base64, migration v17 makes `settings.value` MEDIUMTEXT). Shown at the
+  top right of the first page. Without GD on the server only JPG uploads are accepted.
+- **Farbe** (`pdf_color`, `#RRGGBB`): title and banner; on light colours the banner text turns black.
+- **Schriftart** (`pdf_font`): one of the Google Fonts bundled in `fonts/` (see `fonts/README.md`),
+  embedded into the PDF as TrueType (`src/TtfFont.php` reads the widths), or Courier as before.
+  An embedded font adds about 40–330 KB per PDF depending on the font (Figtree is the smallest).
+- **Vorschau öffnen** renders a sample PDF (`GET /api/settings/pdf-preview`).
+
+`src/Pdf.php` lays tables out in real columns (`addRow()`), measuring text with the chosen font,
+so proportional fonts line up; text that doesn't fit is shortened with "…".
+
 ## Installable as a homescreen app (PWA)
 
 No App Store, no Xcode, no Apple Developer account — this is a standard installable web app:

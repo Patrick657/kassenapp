@@ -1465,6 +1465,30 @@ function renderSettingsTab() {
         <div class="switch-track ${cfg[t[0]] ? 'on' : ''}"><div class="switch-knob"></div></div>
       </div>`).join('')}
     </div>
+    <div class="card-box" style="padding:0;margin-top:12px">
+      <div class="settings-head">PDF-Gestaltung · Journal, Auswertungen, Z-Bericht und Abrechnung</div>
+      <div class="settings-row" style="cursor:default">
+        <div><div class="title">Logo</div><div class="hint">Oben rechts auf der ersten Seite · PNG, JPG, GIF oder WebP · transparente Bereiche werden weiß</div></div>
+        <div class="pdf-logo">
+          ${cfg.pdfHasLogo ? `<img src="/api/settings/logo?t=${state.admin.logoStamp || 0}" alt="Logo">` : ''}
+          <label class="ghost pdf-logo-btn">${cfg.pdfHasLogo ? 'Ersetzen' : 'Hochladen'}<input id="pdf-logo-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></label>
+          ${cfg.pdfHasLogo ? '<button class="ghost" data-action="delete-pdf-logo">Entfernen</button>' : ''}
+        </div>
+      </div>
+      <div class="settings-row" style="cursor:default">
+        <div><div class="title">Farbe</div><div class="hint">Titel und Kopfbalken · bei hellen Farben wird die Schrift im Balken automatisch schwarz</div></div>
+        <div class="pdf-color"><input id="pdf-color-input" type="color" value="${esc(cfg.pdfColor || '#1A2659')}"><span class="mono">${esc((cfg.pdfColor || '#1A2659').toUpperCase())}</span></div>
+      </div>
+      <div class="settings-row" style="cursor:default">
+        <div><div class="title">Schriftart</div><div class="hint">Google Fonts, fest eingebaut · wird ins PDF eingebettet</div></div>
+        <select id="pdf-font-select" class="settings-text-field">${Object.entries(cfg.pdfFonts || { '': 'Courier (Schreibmaschine)' })
+          .map(([k, label]) => `<option value="${esc(k)}" ${k === (cfg.pdfFont || '') ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
+      </div>
+      <div class="settings-row" style="cursor:default">
+        <div><div class="title">Vorschau</div><div class="hint">Beispiel-PDF mit den aktuellen Einstellungen</div></div>
+        <a class="ghost pdf-logo-btn" href="/api/settings/pdf-preview" target="_blank" rel="noopener">Vorschau öffnen</a>
+      </div>
+    </div>
     <div class="card-box" style="margin-top:12px">
       <div class="form-title" style="margin-bottom:2px">Zugangscode &amp; Löschkennwort</div>
       <div class="form-hint">${state.access.codeConfigured
@@ -1541,6 +1565,32 @@ function renderAdmin() {
         state.settings.reportEmail = value;
         showToast('Berichts-E-Mail gespeichert');
       } catch (e) { showToast(e.message); }
+    });
+    const savePdfSetting = async (patch, msg) => {
+      try {
+        const res = await guardedAdminCall(() => api('/settings', { method: 'PATCH', body: patch }));
+        if (res) { state.settings = res; showToast(msg); }
+      } catch (e) { showToast(e.message); }
+      renderMain();
+    };
+    const colorInput = document.getElementById('pdf-color-input');
+    if (colorInput) colorInput.addEventListener('change', () => savePdfSetting({ pdfColor: colorInput.value }, 'PDF-Farbe gespeichert'));
+    const fontSelect = document.getElementById('pdf-font-select');
+    if (fontSelect) fontSelect.addEventListener('change', () => savePdfSetting({ pdfFont: fontSelect.value }, 'Schriftart gespeichert'));
+    const logoInput = document.getElementById('pdf-logo-input');
+    if (logoInput) logoInput.addEventListener('change', () => {
+      const file = logoInput.files[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) return showToast('Bild zu groß (max. 5 MB)');
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const res = await guardedAdminCall(() => api('/settings/logo', { method: 'POST', body: { dataUrl: reader.result } }));
+          if (res) { state.settings = res; state.admin.logoStamp = Date.now(); showToast('Logo gespeichert'); }
+        } catch (e) { showToast(e.message); }
+        renderMain();
+      };
+      reader.readAsDataURL(file);
     });
   }
   if (state.adminTab === 'invoice') {
@@ -2121,6 +2171,10 @@ function onAction(e) {
         .then((res) => { if (!res) return; state.settings = res; if (key === 'cardEnabled' && !next) state.payment = 'cash'; renderHeader(); renderMain(); })
         .catch((e) => showToast(e.message));
     }
+    case 'delete-pdf-logo':
+      return void guardedAdminCall(() => api('/settings/logo', { method: 'DELETE' }))
+        .then((res) => { if (!res) return; state.settings = res; showToast('Logo entfernt'); renderMain(); })
+        .catch((e) => showToast(e.message));
     case 'save-codes': {
       const accessInput = document.getElementById('access-code-input');
       const deleteInput = document.getElementById('delete-code-input');

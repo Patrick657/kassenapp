@@ -8,7 +8,7 @@ use PDO;
 final class SettingsRepo
 {
     private const BOOL_KEYS = ['track_stock', 'warn_low', 'card_enabled', 'require_code', 'pos_pin_required'];
-    private const STRING_KEYS = ['shop_name', 'report_email'];
+    private const STRING_KEYS = ['shop_name', 'report_email', 'pdf_color', 'pdf_font'];
 
     public function __construct(private readonly PDO $db)
     {
@@ -37,7 +37,41 @@ final class SettingsRepo
             'requireCode' => ($raw['require_code'] ?? '1') === '1',
             'posPinRequired' => ($raw['pos_pin_required'] ?? '1') === '1',
             'reportEmail' => $raw['report_email'] ?? '',
+            'pdfColor' => $raw['pdf_color'] ?? \Festkasse\Pdf::DEFAULT_ACCENT,
+            'pdfFont' => $raw['pdf_font'] ?? '',
+            'pdfFonts' => \Festkasse\TtfFont::AVAILABLE,
+            'pdfHasLogo' => ($raw['pdf_logo'] ?? '') !== '',
         ];
+    }
+
+    /** @return array{font:string, color:string, logo:?string} for new \Festkasse\Pdf() */
+    public function pdfTheme(): array
+    {
+        $raw = $this->raw();
+        return [
+            'font' => $raw['pdf_font'] ?? '',
+            'color' => $raw['pdf_color'] ?? \Festkasse\Pdf::DEFAULT_ACCENT,
+            'logo' => $this->logo(),
+        ];
+    }
+
+    /** The PDF logo as JPEG bytes, or null. */
+    public function logo(): ?string
+    {
+        $stmt = $this->db->prepare("SELECT value FROM settings WHERE `key` = 'pdf_logo'");
+        $stmt->execute();
+        $b64 = (string) $stmt->fetchColumn();
+        $bin = $b64 !== '' ? base64_decode($b64, true) : false;
+        return $bin === false ? null : $bin;
+    }
+
+    public function setLogo(?string $jpeg): void
+    {
+        if ($jpeg === null) {
+            $this->db->prepare("DELETE FROM settings WHERE `key` = 'pdf_logo'")->execute();
+            return;
+        }
+        $this->db->prepare("REPLACE INTO settings (`key`, value) VALUES ('pdf_logo', ?)")->execute([base64_encode($jpeg)]);
     }
 
     public function bool(string $key, bool $default = false): bool
@@ -60,6 +94,8 @@ final class SettingsRepo
             'requireCode' => 'require_code',
             'posPinRequired' => 'pos_pin_required',
             'reportEmail' => 'report_email',
+            'pdfColor' => 'pdf_color',
+            'pdfFont' => 'pdf_font',
         ];
         $stmt = $this->db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
         foreach ($map as $clientKey => $dbKey) {
@@ -67,7 +103,17 @@ final class SettingsRepo
                 continue;
             }
             $value = $patch[$clientKey];
-            if (in_array($dbKey, self::BOOL_KEYS, true)) {
+            if ($dbKey === 'pdf_color') {
+                if (\Festkasse\Pdf::hexToRgb((string) $value) === null) {
+                    throw new \Festkasse\ApiException(400, 'Farbe bitte als #RRGGBB angeben');
+                }
+                $value = '#' . strtoupper(ltrim(trim((string) $value), '#'));
+            } elseif ($dbKey === 'pdf_font') {
+                if (!array_key_exists((string) $value, \Festkasse\TtfFont::AVAILABLE)) {
+                    throw new \Festkasse\ApiException(400, 'Unbekannte Schriftart');
+                }
+                $value = (string) $value;
+            } elseif (in_array($dbKey, self::BOOL_KEYS, true)) {
                 $value = $value ? '1' : '0';
             } else {
                 $value = (string) $value;

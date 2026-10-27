@@ -544,6 +544,33 @@ final class Api
             return $this->settings->forClient();
         }
 
+        if ($path === '/api/settings/logo') {
+            $this->auth->requireAccess();
+            if ($method === 'POST') {
+                return $this->saveLogo();
+            }
+            if ($method === 'DELETE') {
+                $this->settings->setLogo(null);
+                $this->audit->log('settings.logo', 'PDF-Logo entfernt');
+                return $this->settings->forClient();
+            }
+            if ($method === 'GET') {
+                $logo = $this->settings->logo();
+                if ($logo === null) {
+                    throw new ApiException(404, 'Kein Logo hinterlegt');
+                }
+                header('Content-Type: image/jpeg');
+                header('Cache-Control: no-store');
+                echo $logo;
+                exit;
+            }
+        }
+
+        if ($method === 'GET' && $path === '/api/settings/pdf-preview') {
+            $this->auth->requireAccess();
+            $this->outputPdfPreview();
+        }
+
         if ($path === '/api/settings/codes') {
             $this->auth->requireAccess();
             if ($method === 'GET') {
@@ -1066,13 +1093,12 @@ final class Api
         $title = $shopName . ' · ' . $register['name'];
 
         $balance = $this->cash->balanceCents($register['id']);
-        $pdf = new Pdf($title . ' · Journal');
+        $pdf = $this->newPdf($title . ' · Journal');
         $pdf->addBanner(
             [
                 ['text' => 'Kassenbestand aktuell: ' . Support::eur($balance), 'bold' => true, 'size' => 13.0],
                 ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr · ' . count($rows) . ' Eintrag(e)'],
-            ],
-            [0.10, 0.15, 0.35]
+            ]
         );
         // One card per Vorgang, using the full line width: a bold, coloured header (Nr. · Typ ·
         // Datum/Zeit, amount right-aligned) followed by one line per purchased article or
@@ -1097,7 +1123,7 @@ final class Api
 
             if (!empty($r['lines'])) {
                 foreach ($r['lines'] as $line) {
-                    $pdf->addSplitLine('  ' . Support::padDisplay($line['label'], 85), Support::eur($line['amountCents']));
+                    $pdf->addSplitLine('    ' . $line['label'], Support::eur($line['amountCents']));
                 }
             } elseif ($r['note'] !== '') {
                 $pdf->addLine('  ' . $r['note']);
@@ -1133,14 +1159,13 @@ final class Api
         $payments = $this->reports->payments($registerId);
         $groups = $this->reports->groups($trackStock, $registerId, $registerId !== null ? $this->registers->categoryNames($registerId) : null);
 
-        $pdf = new Pdf($shopName . ' · Auswertungen · ' . $scope);
+        $pdf = $this->newPdf($shopName . ' · Auswertungen · ' . $scope);
         $pdf->addBanner(
             [
                 ['text' => 'Umsatz gesamt: ' . Support::eur($kpis['totalRevenueCents']), 'bold' => true, 'size' => 13.0],
                 ['text' => 'Heute: ' . Support::eur($kpis['todayRevenueCents']) . ' (' . $kpis['todayCount'] . ' Bons) · Rohertrag: ' . Support::eur($kpis['grossProfitCents']) . ' · Ø Bon: ' . Support::eur($kpis['avgTicketCents'])],
                 ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr'],
-            ],
-            [0.10, 0.15, 0.35]
+            ]
         );
         if ($trackStock && $kpis['lowStockCount'] > 0) {
             $pdf->addLine('Artikel unter Meldebestand: ' . $kpis['lowStockCount'] . ' (' . implode(', ', $kpis['lowStockNames']) . ')');
@@ -1149,14 +1174,14 @@ final class Api
 
         $pdf->addLine('Umsatz pro Tag (letzte 7 Tage)', true);
         foreach ($daily as $d) {
-            $pdf->addLine(Support::padDisplay($d['weekday'] . ' ' . $d['date'], 20) . Support::padDisplayRight(Support::eur($d['totalCents']), 12));
+            $pdf->addRow([[$d['weekday'] . ' ' . $d['date'], 0.3], [Support::eur($d['totalCents']), 0.15, 'R']]);
         }
         $pdf->addSpacer();
 
         $pdf->addLine('Top Artikel nach Umsatz', true);
-        $pdf->addLine(Support::padDisplay('Artikel', 40) . Support::padDisplayRight('Menge', 10) . Support::padDisplayRight('Umsatz', 14));
+        $pdf->addRow([['Artikel', 0.55], ['Menge', 0.15, 'R'], ['Umsatz', 0.3, 'R']], true);
         foreach ($ranking as $r) {
-            $pdf->addLine(Support::padDisplay($r['name'] ?? '–', 40) . Support::padDisplayRight($r['qty'] . '×', 10) . Support::padDisplayRight(Support::eur($r['revenueCents']), 14));
+            $pdf->addRow([[$r['name'] ?? '–', 0.55], [$r['qty'] . '×', 0.15, 'R'], [Support::eur($r['revenueCents']), 0.3, 'R']]);
         }
         if (empty($ranking)) {
             $pdf->addLine('Noch keine Verkäufe.');
@@ -1172,26 +1197,20 @@ final class Api
         $pdf->addSpacer();
 
         $pdf->addLine('Artikelgruppen', true);
-        $pdf->addLine(Support::padDisplay('Gruppe', 30) . Support::padDisplayRight('Anteil', 9) . Support::padDisplayRight('Umsatz', 14) . Support::padDisplayRight('Rohertrag', 16));
+        $pdf->addRow([['Gruppe', 0.4], ['Anteil', 0.15, 'R'], ['Umsatz', 0.2, 'R'], ['Rohertrag', 0.25, 'R']], true);
         foreach ($groups as $g) {
-            $pdf->addLine(
-                Support::padDisplay($g['name'], 30) . Support::padDisplayRight($g['sharePct'] . '%', 9)
-                . Support::padDisplayRight(Support::eur($g['revenueCents']), 14) . Support::padDisplayRight(Support::eur($g['profitCents']), 16)
-            );
+            $pdf->addRow([[$g['name'], 0.4], [$g['sharePct'] . '%', 0.15, 'R'], [Support::eur($g['revenueCents']), 0.2, 'R'], [Support::eur($g['profitCents']), 0.25, 'R']]);
         }
 
         $comp = $this->reports->comp($registerId);
         if (!empty($comp)) {
             $pdf->addSpacer();
             $pdf->addLine('Ohne Berechnung (nicht im Umsatz enthalten)', true);
-            $pdf->addLine(Support::padDisplay('Bereich', 30) . Support::padDisplayRight('Buchungen', 11) . Support::padDisplayRight('Warenwert VK', 16) . Support::padDisplayRight('Wareneinsatz EK', 18));
+            $pdf->addRow([['Bereich', 0.4], ['Buchungen', 0.15, 'R'], ['Warenwert VK', 0.2, 'R'], ['Wareneinsatz EK', 0.25, 'R']], true);
             foreach ($comp as $c) {
-                $pdf->addLine(
-                    Support::padDisplay($c['name'], 30) . Support::padDisplayRight((string) $c['count'], 11)
-                    . Support::padDisplayRight(Support::eur($c['valueCents']), 16) . Support::padDisplayRight(Support::eur($c['costCents']), 18)
-                );
+                $pdf->addRow([[$c['name'], 0.4], [(string) $c['count'], 0.15, 'R'], [Support::eur($c['valueCents']), 0.2, 'R'], [Support::eur($c['costCents']), 0.25, 'R']]);
                 foreach ($c['items'] as $item) {
-                    $pdf->addLine('  ' . Support::padDisplay($item['qty'] . '× ' . $item['name'], 39) . Support::padDisplayRight(Support::eur($item['valueCents']), 16));
+                    $pdf->addRow([['    ' . $item['qty'] . '× ' . $item['name'], 0.55], [Support::eur($item['valueCents']), 0.2, 'R']]);
                 }
             }
         }
@@ -1220,35 +1239,29 @@ final class Api
         if ($z['fromSaleAt'] !== null) {
             $period .= ' · seit ' . (new \DateTime($z['fromSaleAt']))->format('d.m.Y H:i') . ' Uhr';
         }
-        $pdf = new Pdf($shopName . ' · Tagesabschluss Z-' . $z['no']);
+        $pdf = $this->newPdf($shopName . ' · Tagesabschluss Z-' . $z['no']);
         $pdf->addBanner(
             [
                 ['text' => 'Endstand: ' . Support::eur($z['totalCents']), 'bold' => true, 'size' => 13.0],
                 ['text' => $period],
                 ['text' => 'Bar ' . Support::eur($z['cashCents']) . ' · Karte ' . Support::eur($z['cardCents'])
                     . ($z['invoiceCents'] > 0 ? ' · Auf Rechnung ' . Support::eur($z['invoiceCents']) : '') . ' · ' . $z['salesCount'] . ' Bon(s)'],
-            ],
-            [0.10, 0.15, 0.35]
+            ]
         );
         $pdf->addLine('Bar aus der Kasse entnommen: ' . Support::eur($z['drawerCents']));
         $pdf->addSpacer();
 
         $sales = $this->zReports->salesFor($z['id']);
         $pdf->addLine('Verkäufe', true);
-        $pdf->addSplitLine(
-            Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . Support::padDisplay('Zahlung', 10),
-            'Betrag',
-            bold: true
-        );
+        $pdf->addRow([['Bon-Nr.', 0.2], ['Datum/Zeit', 0.25], ['Zahlung', 0.3], ['Betrag', 0.25, 'R']], true);
         $pdf->addRule();
         foreach ($sales as $s) {
-            $pdf->addSplitLine(
-                Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
-                . Support::padDisplay(match ($s['payment']) { 'card' => 'Karte', 'invoice' => 'Re. ' . ($s['invoiceCode'] ?? ''), default => 'Bar' }, 10),
-                Support::eur($s['totalCents']),
-                leftColor: Pdf::GREEN,
-                rightColor: Pdf::GREEN
-            );
+            $pdf->addRow([
+                [$s['receiptNo'], 0.2],
+                [(new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 0.25],
+                [match ($s['payment']) { 'card' => 'Karte', 'invoice' => 'Rechnung ' . ($s['invoiceCode'] ?? ''), default => 'Bar' }, 0.3],
+                [Support::eur($s['totalCents']), 0.25, 'R'],
+            ], color: Pdf::GREEN);
             $pdf->addRule();
         }
         if (empty($sales)) {
@@ -1275,6 +1288,81 @@ final class Api
         return ['ok' => true];
     }
 
+    /** A PDF in the look set under Einstellungen → PDF-Gestaltung (font, colour, logo). */
+    private function newPdf(string $title): Pdf
+    {
+        return new Pdf($title, $this->settings->pdfTheme());
+    }
+
+    /**
+     * Stores the uploaded logo (data URL from the browser) as a JPEG of at most 600 px, flattened
+     * on white — the PDF writer embeds JPEG directly, and a fixed size keeps every PDF small.
+     */
+    private function saveLogo(): array
+    {
+        $dataUrl = (string) (Support::jsonBody()['dataUrl'] ?? '');
+        if (!preg_match('#^data:image/(png|jpe?g|gif|webp);base64,(.+)$#s', $dataUrl, $m)) {
+            throw new ApiException(400, 'Bitte ein Bild als PNG, JPG, GIF oder WebP hochladen');
+        }
+        $raw = base64_decode($m[2], true);
+        if ($raw === false || strlen($raw) > 5 * 1024 * 1024) {
+            throw new ApiException(400, 'Bild zu groß (max. 5 MB)');
+        }
+        if (function_exists('imagecreatefromstring')) {
+            $src = @imagecreatefromstring($raw);
+            if ($src === false) {
+                throw new ApiException(400, 'Bild konnte nicht gelesen werden');
+            }
+            $w = imagesx($src);
+            $h = imagesy($src);
+            $scale = min(1, 600 / max($w, $h));
+            $nw = max(1, (int) round($w * $scale));
+            $nh = max(1, (int) round($h * $scale));
+            $dst = imagecreatetruecolor($nw, $nh);
+            imagefill($dst, 0, 0, imagecolorallocate($dst, 255, 255, 255));
+            imagecopyresampled($dst, $src, 0, 0, 0, 0, $nw, $nh, $w, $h);
+            ob_start();
+            imagejpeg($dst, null, 90);
+            $jpeg = (string) ob_get_clean();
+        } elseif (($info = @getimagesizefromstring($raw)) !== false && $info[2] === IMAGETYPE_JPEG) {
+            $jpeg = $raw; // no GD on this server: JPEG is used as uploaded
+        } else {
+            throw new ApiException(400, 'Dieser Server kann nur JPG-Logos verarbeiten');
+        }
+        $this->settings->setLogo($jpeg);
+        $this->audit->log('settings.logo', 'PDF-Logo hochgeladen');
+        return $this->settings->forClient();
+    }
+
+    /** Sample PDF so the look can be checked right in the settings. */
+    private function outputPdfPreview(): never
+    {
+        $shopName = $this->settings->forClient()['shopName'];
+        $pdf = $this->newPdf($shopName . ' · Vorschau');
+        $pdf->addBanner([
+            ['text' => 'Endstand: ' . Support::eur(123450), 'bold' => true, 'size' => 13.0],
+            ['text' => 'So sehen Journal, Auswertungen, Z-Bericht und Abrechnung aus'],
+            ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr'],
+        ]);
+        $pdf->addLine('Top Artikel nach Umsatz', true);
+        $pdf->addRow([['Artikel', 0.55], ['Menge', 0.15, 'R'], ['Umsatz', 0.3, 'R']], true);
+        $pdf->addRule();
+        foreach ([['Helles 0,5 l', 212, 74200], ['Bratwurst im Brötchen', 96, 33600], ['Pommes rot/weiß', 51, 15300]] as [$name, $qty, $cents]) {
+            $pdf->addRow([[$name, 0.55], [$qty . '×', 0.15, 'R'], [Support::eur($cents), 0.3, 'R']]);
+        }
+        $pdf->addRule();
+        $pdf->addSplitLine('Summe', Support::eur(123100), bold: true);
+        $pdf->addSpacer();
+        $pdf->addSplitLine('Nr. 000123  ·  Verkauf  ·  ' . date('d.m.Y H:i') . ' Uhr', Support::eur(1250), bold: true, rightColor: Pdf::GREEN);
+        $pdf->addSplitLine('    2× Helles 0,5 l', Support::eur(900));
+        $pdf->addSplitLine('    1× Bratwurst im Brötchen', Support::eur(350));
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: inline; filename="Vorschau.pdf"');
+        header('Cache-Control: no-store');
+        echo $pdf->output();
+        exit;
+    }
+
     /** Abrechnung of one Firma as PDF — the basis for writing the invoice. */
     private function outputStatementPdf(array $st): never
     {
@@ -1285,14 +1373,13 @@ final class Api
             ? ' · ' . ($st['from'] ? date('d.m.Y', strtotime($st['from'])) : '…') . ' – ' . ($st['to'] ? date('d.m.Y', strtotime($st['to'])) : '…')
             : '';
 
-        $pdf = new Pdf($shopName . ' · Abrechnung auf Rechnung');
+        $pdf = $this->newPdf($shopName . ' · Abrechnung auf Rechnung');
         $pdf->addBanner(
             [
                 ['text' => $acc['code'] . ' · ' . $acc['name'], 'bold' => true, 'size' => 13.0],
                 ['text' => 'Summe: ' . Support::eur($st['totals']['totalCents']) . ' · ' . $st['totals']['count'] . ' Bon(s) · ' . $statusText . $range],
                 ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr'],
-            ],
-            [0.10, 0.15, 0.35]
+            ]
         );
         if ($acc['address'] !== '') {
             foreach (explode("\n", $acc['address']) as $line) {
@@ -1302,19 +1389,14 @@ final class Api
         }
 
         $pdf->addLine('Artikel', true);
-        $pdf->addSplitLine(Support::padDisplay('Menge', 8) . Support::padDisplay('Artikel', 44) . Support::padDisplayRight('Einzel', 12), 'Gesamt', bold: true);
+        $cols = static fn (string $qty, string $name, string $unit, string $sum): array => [[$qty, 0.1], [$name, 0.5], [$unit, 0.2, 'R'], [$sum, 0.2, 'R']];
+        $pdf->addRow($cols('Menge', 'Artikel', 'Einzel', 'Gesamt'), true);
         $pdf->addRule();
         foreach ($st['items'] as $i) {
-            $pdf->addSplitLine(
-                Support::padDisplay($i['qty'] . '×', 8) . Support::padDisplay($i['name'], 44) . Support::padDisplayRight(Support::eur($i['unitCents']), 12),
-                Support::eur($i['sumCents'])
-            );
+            $pdf->addRow($cols($i['qty'] . '×', $i['name'], Support::eur($i['unitCents']), Support::eur($i['sumCents'])));
         }
         foreach ($st['returns'] as $r) {
-            $pdf->addSplitLine(
-                Support::padDisplay($r['qty'] . '×', 8) . Support::padDisplay('Pfand-Rückgabe ' . $r['name'], 44) . Support::padDisplayRight('-' . Support::eur($r['unitCents']), 12),
-                '-' . Support::eur($r['sumCents'])
-            );
+            $pdf->addRow($cols($r['qty'] . '×', 'Pfand-Rückgabe ' . $r['name'], '-' . Support::eur($r['unitCents']), '-' . Support::eur($r['sumCents'])));
         }
         $pdf->addRule();
         $t = $st['totals'];
@@ -1332,26 +1414,26 @@ final class Api
         $pdf->addSpacer();
 
         $pdf->addLine('Bons', true);
-        $pdf->addSplitLine(Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . 'Vermerk', 'Betrag', bold: true);
+        $pdf->addRow([['Bon-Nr.', 0.15], ['Datum/Zeit', 0.2], ['Vermerk', 0.45], ['Betrag', 0.2, 'R']], true);
         $pdf->addRule();
         foreach ($st['sales'] as $s) {
-            $pdf->addSplitLine(
-                Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
-                . Support::padDisplay($s['ref'] . ($s['billedRef'] !== '' ? ' (Re. ' . $s['billedRef'] . ')' : ''), 40),
-                Support::eur($s['totalCents']),
-                bold: true
-            );
+            $pdf->addRow([
+                [$s['receiptNo'], 0.15],
+                [(new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 0.2],
+                [$s['ref'] . ($s['billedRef'] !== '' ? ' (Re. ' . $s['billedRef'] . ')' : ''), 0.45],
+                [Support::eur($s['totalCents']), 0.2, 'R'],
+            ], true);
             foreach ($s['lines'] as $l) {
-                $pdf->addSplitLine('  ' . Support::padDisplay($l['qty'] . '× ' . $l['name'], 60), Support::eur($l['qty'] * $l['unitCents']));
+                $pdf->addSplitLine('    ' . $l['qty'] . '× ' . $l['name'], Support::eur($l['qty'] * $l['unitCents']));
             }
             if ($s['discountCents']) {
-                $pdf->addSplitLine('  Rabatt', '-' . Support::eur($s['discountCents']));
+                $pdf->addSplitLine('    Rabatt', '-' . Support::eur($s['discountCents']));
             }
             if ($s['depositCents']) {
-                $pdf->addSplitLine('  Pfand', Support::eur($s['depositCents']));
+                $pdf->addSplitLine('    Pfand', Support::eur($s['depositCents']));
             }
             foreach ($s['returns'] as $r) {
-                $pdf->addSplitLine('  ' . Support::padDisplay($r['qty'] . '× Pfand-Rückgabe ' . $r['name'], 60), '-' . Support::eur($r['amountCents']));
+                $pdf->addSplitLine('    ' . $r['qty'] . '× Pfand-Rückgabe ' . $r['name'], '-' . Support::eur($r['amountCents']));
             }
             $pdf->addRule();
         }

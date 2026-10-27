@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 16;
+    private const LATEST_VERSION = 17;
 
     private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp','void')";
 
@@ -135,6 +135,15 @@ final class Migrator
                 $this->setVersion(16);
             } catch (\Throwable $e) {
                 error_log('[Festkasse Migrator] v16 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 17) {
+            try {
+                // PDF logo is kept in settings (base64 JPEG) — TEXT's 64 KB is too tight for that.
+                $this->db->exec('ALTER TABLE settings MODIFY COLUMN value MEDIUMTEXT NOT NULL');
+                $this->setVersion(17);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v17 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
             }
         }
     }
