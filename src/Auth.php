@@ -283,6 +283,12 @@ final class Auth
         $stmt = $this->db->prepare('SELECT id, name, role, pin_hash FROM users WHERE id = ? AND active = 1');
         $stmt->execute([$userId]);
         $user = $stmt->fetch();
+        // Setting "PIN an der Kasse" off: cashiers log in by tapping their name. Admins always
+        // need their PIN — their login opens Verwaltung.
+        if ($user && $user['role'] === 'cashier' && ($this->setting('pos_pin_required') ?? '1') === '0') {
+            $this->issuePosSession((int) $user['id']);
+            return ['user' => ['id' => (int) $user['id'], 'name' => $user['name'], 'role' => $user['role']]];
+        }
         $ok = $user && password_verify($pin, $user['pin_hash']);
         $this->recordAttempt($ip, (bool) $ok);
         if (!$ok) {

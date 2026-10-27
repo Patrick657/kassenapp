@@ -168,6 +168,9 @@ reserved for `admin`-role logins (or the Zugangscode alone, when the feature isn
   (same pad as the admin unlock). On success the device stays logged in as that user **until
   someone taps "Wechseln"** — deliberately no timeout, since the intent is "this iPad is the merch
   stand for the whole day," not a per-transaction login.
+- **"PIN bei Anmeldung an der Kasse"** (Einstellungen, setting `pos_pin_required`, default on): when
+  switched off, `cashier` users log in with one tap on their name, no PIN. `admin` users always need
+  their PIN — enforced in `Auth::posLogin()`, not just in the UI.
 - **Enforced server-side, not just hidden in the UI**: `GET /api/bootstrap` filters the `products`
   list by the current device's allowed groups, and `POST /api/sales` independently re-checks every
   cart line's article group against the same list before booking the sale — a cashier device can't

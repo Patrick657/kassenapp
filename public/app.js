@@ -69,7 +69,7 @@ async function api(path, opts = {}) {
 const state = {
   loaded: false,
   shopName: 'Festkasse',
-  settings: { trackStock: true, warnLow: true, cardEnabled: true, requireCode: true },
+  settings: { trackStock: true, warnLow: true, cardEnabled: true, requireCode: true, posPinRequired: true },
   products: [],
   depositTypes: [],
   compAccounts: [],
@@ -682,6 +682,21 @@ async function pinPress(k) {
   renderOverlay();
 }
 
+async function posLoginAs(userId, pin) {
+  const res = await api('/pos/login', { method: 'POST', body: { userId, pin } });
+  state.showPosPin = false; state.posPinBuf = ''; state.posPinError = ''; state.posSelectedUserId = null;
+  state.posUser = res.user;
+  if (res.user.role === 'cashier' && state.view === 'admin') {
+    state.view = 'pos';
+    state.adminTab = 'overview';
+  }
+  renderOverlay();
+  await loadBootstrap();
+  renderHeader();
+  renderMain();
+  showToast('Angemeldet als ' + res.user.name);
+}
+
 async function posPinPress(k) {
   if (k === 'del') { state.posPinBuf = state.posPinBuf.slice(0, -1); state.posPinError = ''; renderOverlay(); return; }
   if (k === 'x') { state.showPosPin = false; state.posSelectedUserId = null; state.posPinBuf = ''; state.posPinError = ''; renderOverlay(); return; }
@@ -689,18 +704,7 @@ async function posPinPress(k) {
   state.posPinBuf = buf;
   if (buf.length === 4) {
     try {
-      const res = await api('/pos/login', { method: 'POST', body: { userId: state.posSelectedUserId, pin: buf } });
-      state.showPosPin = false; state.posPinBuf = ''; state.posPinError = ''; state.posSelectedUserId = null;
-      state.posUser = res.user;
-      if (res.user.role === 'cashier' && state.view === 'admin') {
-        state.view = 'pos';
-        state.adminTab = 'overview';
-      }
-      renderOverlay();
-      await loadBootstrap();
-      renderHeader();
-      renderMain();
-      showToast('Angemeldet als ' + res.user.name);
+      await posLoginAs(state.posSelectedUserId, buf);
     } catch (e) {
       state.posPinBuf = '';
       state.posPinError = e.status === 429 ? 'Zu viele Fehlversuche · später erneut' : 'Falscher PIN';
@@ -1443,6 +1447,7 @@ function renderSettingsTab() {
     ['warnLow', 'Warnung bei niedrigem Bestand', 'Hinweis beim Kassieren und in der Übersicht'],
     ['cardEnabled', 'Kartenzahlung anbieten', 'Bar/Karte-Umschalter in der Kasse'],
     ['requireCode', 'Änderungen mit Code schützen', 'Freigabe gilt 2 Stunden, danach automatisch gesperrt'],
+    ['posPinRequired', 'PIN bei Anmeldung an der Kasse', 'Aus: Kassierer melden sich mit einem Tipp auf ihren Namen an · Admins brauchen immer ihre PIN'],
   ].filter((t) => t[0] !== 'warnLow' || cfg.trackStock);
   return `<div class="settings-card">
     <div class="card-box" style="padding:0">
@@ -1860,7 +1865,14 @@ function onAction(e) {
     case 'close-form': return closeForm();
     case 'submit-form': return void submitForm();
     case 'pin-press': return void pinPress(d.key);
-    case 'pos-pick-user': state.posSelectedUserId = Number(d.id); state.showPosPin = true; state.posPinBuf = ''; state.posPinError = ''; return renderOverlay();
+    case 'pos-pick-user': {
+      const picked = state.posUsers.find((u) => u.id === Number(d.id));
+      // Without the PIN setting, cashiers log in with one tap; admins always enter their PIN.
+      if (picked && picked.role === 'cashier' && !state.settings.posPinRequired) {
+        return void posLoginAs(picked.id, '').catch((e) => showToast(e.message));
+      }
+      state.posSelectedUserId = Number(d.id); state.showPosPin = true; state.posPinBuf = ''; state.posPinError = ''; return renderOverlay();
+    }
     case 'pos-pin-press': return void posPinPress(d.key);
     case 'pos-switch-user': return void posSwitchUser();
     case 'forgot-code': return void api('/access/forgot', { method: 'POST' })

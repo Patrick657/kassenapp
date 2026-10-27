@@ -7,7 +7,7 @@ use PDO;
 
 final class SettingsRepo
 {
-    private const BOOL_KEYS = ['track_stock', 'warn_low', 'card_enabled', 'require_code'];
+    private const BOOL_KEYS = ['track_stock', 'warn_low', 'card_enabled', 'require_code', 'pos_pin_required'];
     private const STRING_KEYS = ['shop_name', 'report_email'];
 
     public function __construct(private readonly PDO $db)
@@ -35,6 +35,7 @@ final class SettingsRepo
             'warnLow' => ($raw['warn_low'] ?? '1') === '1',
             'cardEnabled' => ($raw['card_enabled'] ?? '1') === '1',
             'requireCode' => ($raw['require_code'] ?? '1') === '1',
+            'posPinRequired' => ($raw['pos_pin_required'] ?? '1') === '1',
             'reportEmail' => $raw['report_email'] ?? '',
         ];
     }
@@ -57,6 +58,7 @@ final class SettingsRepo
             'warnLow' => 'warn_low',
             'cardEnabled' => 'card_enabled',
             'requireCode' => 'require_code',
+            'posPinRequired' => 'pos_pin_required',
             'reportEmail' => 'report_email',
         ];
         $stmt = $this->db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
