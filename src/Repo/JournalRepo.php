@@ -83,8 +83,8 @@ final class JournalRepo
             $lines = match ($m['type']) {
                 'sale', 'comp' => $itemLines[(int) $m['sale_id']] ?? [],
                 'deposit_return' => [[
-                    'label' => $m['qty'] . '× ' . ($m['deposit_type_name'] ?? 'Pfand'),
-                    'amountCents' => (int) $m['amount_cents'],
+                    'label' => $m['qty'] . '× ' . ($m['deposit_type_name'] ?? 'Pfand') . (($m['credit_cents'] ?? null) !== null ? ' (Gutschrift auf Rechnung, nicht bar)' : ''),
+                    'amountCents' => ($m['credit_cents'] ?? null) !== null ? -(int) $m['credit_cents'] : (int) $m['amount_cents'],
                 ]],
                 default => [],
             };

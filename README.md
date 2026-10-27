@@ -324,6 +324,35 @@ quantities, stock, what it was worth — but must never show up as revenue or as
 - `Migrator::migrateToV6()` runs on every request and re-declares the `cash_movements.type` enum —
   it and v11 share `CASH_MOVEMENT_TYPE_ENUM` for that reason. Add future enum values there.
 
+## Auf Rechnung (Firmen, die später per Rechnung zahlen)
+
+For customers who don't pay at the stand but get an invoice afterwards (sponsors, a club, the
+brewery's own staff tab). Unlike "Ohne Berechnung" this **is revenue**.
+
+- **Verwaltung → Auf Rechnung** manages the Firmen (`invoice_accounts`, migration v15): a short
+  **Kürzel** (max. 12 chars, shown as the button in the Kasse), the Firmenname, optionally an
+  Anschrift and a Notiz for the invoice. As soon as one exists, the Kasse shows a Zahlart
+  **"Rechnung"** next to Bar/Karte; with none configured nothing changes.
+- **Booking**: cart → "Rechnung" → tap the Kürzel → optional *Vermerk* (e.g. who ordered) →
+  "Auf Rechnung buchen". Rabatt and Pfand work as with Karte. The Zahlart falls back to Bar after
+  every booking. Code, name and Vermerk are frozen on the sale (`sales.invoice_*`).
+- **Money**: counts as Umsatz in every report, the journal gets a normal `sale` entry
+  ("… · Auf Rechnung · KÜRZEL") with amount 0, the drawer is not touched (like Karte). The
+  Z-Bericht shows the share separately (`z_reports.invoice_cents`).
+- **Pfand-Rückgabe auf Rechnung** (migration v16): with "Rechnung" selected, returned Krüge are
+  **credited to the Firma** instead of paid out from the drawer — together with new goods (net
+  amount) or alone (a Gutschrift, negative amount). The `deposit_return` row keeps amount 0 and the
+  credited amount in `cash_movements.credit_cents`; reports and the Z-Bericht deduct it from the
+  "Auf Rechnung" share, not from Bar. Customers paying Bar/Karte still get their Pfand in cash.
+- **Abrechnung**: per Firma, the open Bons with all articles summed (Menge × Einzelpreis), Rabatt,
+  Pfand, Pfand-Rückgaben (deducted) and the Bons themselves; filter Offen / Abgerechnet / Alle and a date range. **PDF** to
+  write the invoice from, **CSV** (one row per article line, `;`, UTF-8 BOM) for Excel or the
+  invoicing program. "Als abgerechnet markieren" (optionally with the Rechnungsnummer) sets
+  `sales.billed_at/billed_ref`, so the Bons leave "Offen" and can't be billed twice; it can be
+  taken back per Bon. A billed Bon can't be storniert until that is taken back.
+- **Löschen** a Firma archives it (gone from the Kasse, history kept) and is refused while it still
+  has open Bons.
+
 ## Storno (Bon stornieren)
 
 - **Where**: Verwaltung → Journal → open a Bon → **"Bon stornieren"** (only shown in Verwaltung, never

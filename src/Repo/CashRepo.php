@@ -31,13 +31,14 @@ final class CashRepo
         return (int) $stmt->fetchColumn();
     }
 
-    public function insert(int $registerId, string $type, int $amountCents, string $note, ?int $saleId = null, ?int $productId = null, ?int $qty = null, ?int $depositTypeId = null): int
+    /** $creditCents: Pfand credited on an invoice instead of paid out (then $amountCents is 0). */
+    public function insert(int $registerId, string $type, int $amountCents, string $note, ?int $saleId = null, ?int $productId = null, ?int $qty = null, ?int $depositTypeId = null, ?int $creditCents = null): int
     {
         $stmt = $this->db->prepare(
-            'INSERT INTO cash_movements (occurred_at, type, register_id, amount_cents, note, sale_id, product_id, qty, deposit_type_id, user_id, user_name)
-             VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO cash_movements (occurred_at, type, register_id, amount_cents, credit_cents, note, sale_id, product_id, qty, deposit_type_id, user_id, user_name)
+             VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$type, $registerId, $amountCents, $note, $saleId, $productId, $qty, $depositTypeId, $this->actor['id'] ?? null, $this->actor['name'] ?? null]);
+        $stmt->execute([$type, $registerId, $amountCents, $creditCents, $note, $saleId, $productId, $qty, $depositTypeId, $this->actor['id'] ?? null, $this->actor['name'] ?? null]);
         return (int) $this->db->lastInsertId();
     }
 

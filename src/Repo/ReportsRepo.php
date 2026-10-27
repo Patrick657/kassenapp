@@ -168,16 +168,21 @@ final class ReportsRepo
              FROM sales WHERE voided_at IS NULL AND payment <> 'comp'" . $f . " GROUP BY payment",
             $p
         );
-        $out = ['cash' => ['sumCents' => 0, 'count' => 0], 'card' => ['sumCents' => 0, 'count' => 0]];
+        $out = ['cash' => ['sumCents' => 0, 'count' => 0], 'card' => ['sumCents' => 0, 'count' => 0], 'invoice' => ['sumCents' => 0, 'count' => 0]];
         $returned = 0;
         foreach ($rows as $r) {
             $out[$r['payment']] = ['sumCents' => (int) $r['sum_cents'], 'count' => (int) $r['cnt']];
-            $returned += (int) $r['returned_cents'];
+            if ($r['payment'] === 'invoice') {
+                // Credited on the Firma's invoice, not paid out.
+                $out['invoice']['sumCents'] -= (int) $r['returned_cents'];
+            } else {
+                $returned += (int) $r['returned_cents'];
+            }
         }
-        // Returned Pfand is always paid out in cash, even when the same checkout was paid by card.
+        // Returned Pfand is paid out in cash, even when the same checkout was paid by card.
         $out['cash']['sumCents'] -= $returned;
-        $totalCount = $out['cash']['count'] + $out['card']['count'];
-        $totalSum = $out['cash']['sumCents'] + $out['card']['sumCents'];
+        $totalCount = $out['cash']['count'] + $out['card']['count'] + $out['invoice']['count'];
+        $totalSum = $out['cash']['sumCents'] + $out['card']['sumCents'] + $out['invoice']['sumCents'];
         $out['avgTicketCents'] = $totalCount > 0 ? (int) round($totalSum / $totalCount) : 0;
         return $out;
     }

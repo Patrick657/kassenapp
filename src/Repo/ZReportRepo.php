@@ -51,6 +51,7 @@ final class ZReportRepo
             'salesCount' => (int) $r['sales_count'],
             'cashCents' => (int) $r['cash_cents'],
             'cardCents' => (int) $r['card_cents'],
+            'invoiceCents' => (int) ($r['invoice_cents'] ?? 0),
             'totalCents' => (int) $r['total_cents'],
             'drawerCents' => (int) $r['drawer_cents'],
         ];
@@ -83,7 +84,7 @@ final class ZReportRepo
         }
         [$where, $params] = $filter;
         $stmt = $this->db->prepare(
-            "SELECT receipt_no, sold_at, " . ReportsRepo::NET_CENTS . " AS total_cents, payment FROM sales
+            "SELECT receipt_no, sold_at, " . ReportsRepo::NET_CENTS . " AS total_cents, payment, invoice_code FROM sales
              WHERE voided_at IS NULL AND payment <> 'comp'" . $where . ' ORDER BY sold_at ASC'
         );
         $stmt->execute($params);
@@ -92,6 +93,7 @@ final class ZReportRepo
             'soldAt' => Support::toIso($r['sold_at']),
             'totalCents' => (int) $r['total_cents'],
             'payment' => $r['payment'],
+            'invoiceCode' => $r['invoice_code'],
         ], $stmt->fetchAll());
     }
 
@@ -124,7 +126,9 @@ final class ZReportRepo
         $sql = "SELECT COUNT(*) AS cnt,
                        COALESCE(SUM(CASE WHEN payment = 'cash' THEN total_cents ELSE 0 END), 0) AS cash_cents,
                        COALESCE(SUM(CASE WHEN payment = 'card' THEN total_cents ELSE 0 END), 0) AS card_cents,
-                       COALESCE(SUM(deposit_returned_cents), 0) AS returned_cents
+                       COALESCE(SUM(CASE WHEN payment = 'invoice' THEN total_cents ELSE 0 END), 0) AS invoice_cents,
+                       COALESCE(SUM(CASE WHEN payment <> 'invoice' THEN deposit_returned_cents ELSE 0 END), 0) AS returned_cents,
+                       COALESCE(SUM(CASE WHEN payment = 'invoice' THEN deposit_returned_cents ELSE 0 END), 0) AS invoice_returned_cents
                 FROM sales
                 WHERE voided_at IS NULL AND payment <> 'comp' AND register_id = ?" . ($lastCloseAt !== null ? ' AND sold_at > ?' : '');
         $stmt = $this->db->prepare($sql);
@@ -139,7 +143,9 @@ final class ZReportRepo
         // paid out in cash even when the same checkout was paid by card. Clamped at 0: the
         // z_reports columns are UNSIGNED.
         $row['cash_cents'] = max(0, (int) $row['cash_cents'] - (int) $row['returned_cents']);
-        $total = (int) $row['cash_cents'] + (int) $row['card_cents'];
+        // Rückgaben "auf Rechnung" are credited on the invoice instead — may make this negative.
+        $row['invoice_cents'] = (int) $row['invoice_cents'] - (int) $row['invoice_returned_cents'];
+        $total = max(0, (int) $row['cash_cents'] + (int) $row['card_cents'] + (int) $row['invoice_cents']);
 
         $this->db->beginTransaction();
         try {
@@ -149,10 +155,10 @@ final class ZReportRepo
             $no = (int) $noStmt->fetchColumn();
 
             $stmt = $this->db->prepare(
-                'INSERT INTO z_reports (no, register_id, closed_at, from_sale_at, sales_count, cash_cents, card_cents, total_cents, drawer_cents)
-                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO z_reports (no, register_id, closed_at, from_sale_at, sales_count, cash_cents, card_cents, invoice_cents, total_cents, drawer_cents)
+                 VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?)'
             );
-            $stmt->execute([$no, $registerId, $lastCloseAt, (int) $row['cnt'], (int) $row['cash_cents'], (int) $row['card_cents'], $total, $balance]);
+            $stmt->execute([$no, $registerId, $lastCloseAt, (int) $row['cnt'], (int) $row['cash_cents'], (int) $row['card_cents'], (int) $row['invoice_cents'], $total, $balance]);
             $id = (int) $this->db->lastInsertId();
 
             $note = 'Tagesabschluss Z-' . $no . ' · Bar entnommen ' . Support::eur($balance);
@@ -170,6 +176,7 @@ final class ZReportRepo
             'salesCount' => (int) $row['cnt'],
             'cashCents' => (int) $row['cash_cents'],
             'cardCents' => (int) $row['card_cents'],
+            'invoiceCents' => (int) $row['invoice_cents'],
             'totalCents' => $total,
         ];
     }

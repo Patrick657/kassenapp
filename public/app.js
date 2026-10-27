@@ -73,6 +73,7 @@ const state = {
   products: [],
   depositTypes: [],
   compAccounts: [],
+  invoiceAccounts: [], // Firmen "auf Rechnung" (Kürzel + Name)
   cashBalanceCents: 0,
   todayRevenueCents: 0,
   // Kassen: this device's Kasse (null = several exist, device not assigned yet) and all Kassen.
@@ -98,6 +99,8 @@ const state = {
   selected: null,
   payment: 'cash',
   compAccountId: null,
+  invoiceAccountId: null,
+  invoiceRef: '', // optional Vermerk for the invoice, e.g. who ordered
   tender: 0,
   discount: 0,
 
@@ -112,7 +115,7 @@ const state = {
   toast: '',
   clock: '',
 
-  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, depositTypes: null, compAccounts: null, comp: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null, registers: null, deviceRegisterId: null },
+  admin: { kpis: null, daily: null, hourly: null, ranking: null, payments: null, groups: null, products: null, categories: null, depositTypes: null, compAccounts: null, comp: null, invoiceAccounts: null, invoiceSel: null, invoiceStatus: 'open', invoiceFrom: '', invoiceTo: '', invoiceStatement: null, journal: null, journalBefore: null, cashStatus: null, zReports: null, maintenanceCounts: null, recoveryEmail: null, users: null, registers: null, deviceRegisterId: null },
 };
 
 let toastTimer = null;
@@ -135,6 +138,9 @@ async function loadBootstrap() {
   state.compAccounts = data.compAccounts || [];
   if (!state.compAccounts.some((a) => a.id === state.compAccountId)) state.compAccountId = null;
   if (state.payment === 'comp' && !state.compAccounts.length) state.payment = 'cash';
+  state.invoiceAccounts = data.invoiceAccounts || [];
+  if (!state.invoiceAccounts.some((a) => a.id === state.invoiceAccountId)) state.invoiceAccountId = null;
+  if (state.payment === 'invoice' && !state.invoiceAccounts.length) state.payment = 'cash';
   state.cashBalanceCents = data.cashBalanceCents;
   state.todayRevenueCents = data.todayRevenueCents;
   state.access = data.access;
@@ -258,9 +264,12 @@ async function checkout() {
     if (!state.compAccounts.some((a) => a.id === state.compAccountId)) return showToast('Bitte Bereich wählen');
     if (cart.some((l) => l.kind === 'return')) return showToast('Pfand-Rückgabe bitte separat buchen');
   }
+  const invoice = payment === 'invoice';
+  if (invoice && !state.invoiceAccounts.some((a) => a.id === state.invoiceAccountId)) return showToast('Bitte Firma wählen');
   // A net amount <= 0 (nothing to collect, or the register owes the customer) is always settled
   // in cash — there's nothing for a card to charge, and Pfand is refunded in cash either way.
-  const effectivePayment = comp ? 'comp' : (total > 0 ? payment : 'cash');
+  // "Auf Rechnung" stays on the invoice even at <= 0: Pfand-Rückgaben are then credited to the Firma.
+  const effectivePayment = comp ? 'comp' : invoice ? 'invoice' : (total > 0 ? payment : 'cash');
   if (total > 0 && effectivePayment === 'cash' && tender < total) return showToast('Betrag noch nicht ausreichend');
   const clientUuid = uid();
   try {
@@ -273,6 +282,8 @@ async function checkout() {
         discountCents: comp ? 0 : state.discount,
         payment: effectivePayment,
         compAccountId: comp ? state.compAccountId : null,
+        invoiceAccountId: effectivePayment === 'invoice' ? state.invoiceAccountId : null,
+        invoiceRef: effectivePayment === 'invoice' ? state.invoiceRef : '',
         givenCents: total > 0 ? (effectivePayment === 'cash' ? tender : total) : 0,
       },
     });
@@ -283,6 +294,8 @@ async function checkout() {
     // Always fall back to a paying sale afterwards — the next customer must never be booked
     // "ohne Berechnung" just because the previous booking was.
     if (comp) { state.payment = 'cash'; state.compAccountId = null; }
+    // Same for "auf Rechnung": the next customer is a normal paying one again.
+    if (invoice) { state.payment = 'cash'; state.invoiceAccountId = null; state.invoiceRef = ''; }
     state.receipt = receipt;
     renderOverlay();
     renderMain();
@@ -384,6 +397,28 @@ async function submitForm() {
       showToast(f.id ? 'Pfand-Option gespeichert' : 'Pfand-Option angelegt');
       await Promise.all([loadDepositTypes(), loadBootstrap()]);
       renderHeader();
+      renderMain();
+      return;
+    }
+    if (f.kind === 'invoice-account') {
+      const body = { code: (f.code || '').trim(), name: (f.name || '').trim(), address: f.address || '', note: f.note || '' };
+      if (!body.code) return setFormError('Kürzel fehlt');
+      if (!body.name) return setFormError('Firmenname fehlt');
+      const ok = await guardedAdminCall(() => (f.id ? api('/invoice-accounts/' + f.id, { method: 'PATCH', body }) : api('/invoice-accounts', { method: 'POST', body })));
+      if (!ok) return;
+      closeForm();
+      showToast(f.id ? 'Firma gespeichert' : 'Firma angelegt');
+      await Promise.all([loadInvoiceAccounts(), loadInvoiceStatement(), loadBootstrap()]);
+      renderHeader();
+      renderMain();
+      return;
+    }
+    if (f.kind === 'invoice-bill') {
+      const res = await guardedAdminCall(() => api('/invoice-accounts/' + f.accountId + '/bill', { method: 'POST', body: { saleIds: f.saleIds, billedRef: f.billedRef || '' } }));
+      if (!res) return;
+      closeForm();
+      showToast(res.changed + ' Bon(s) als abgerechnet markiert');
+      await Promise.all([loadInvoiceAccounts(), loadInvoiceStatement()]);
       renderMain();
       return;
     }
@@ -526,6 +561,24 @@ async function loadCompAccounts() {
   if (data) state.admin.compAccounts = data;
   return data;
 }
+async function loadInvoiceAccounts() {
+  const data = await guardedAdminCall(() => api('/invoice-accounts'));
+  if (data) state.admin.invoiceAccounts = data;
+  return data;
+}
+function invoiceStatementQuery() {
+  const a = state.admin;
+  return 'status=' + a.invoiceStatus + (a.invoiceFrom ? '&from=' + a.invoiceFrom : '') + (a.invoiceTo ? '&to=' + a.invoiceTo : '');
+}
+async function loadInvoiceStatement() {
+  if (!state.admin.invoiceSel) { state.admin.invoiceStatement = null; return; }
+  const data = await guardedAdminCall(() => api('/invoice-accounts/' + state.admin.invoiceSel + '/statement?' + invoiceStatementQuery()));
+  if (data) state.admin.invoiceStatement = data;
+}
+async function loadInvoiceTab() {
+  await Promise.all([loadInvoiceAccounts(), loadInvoiceStatement()]);
+  renderMain();
+}
 async function loadCategories() {
   const data = await guardedAdminCall(() => api('/categories'));
   if (data) state.admin.categories = data;
@@ -573,6 +626,7 @@ async function enterAdminTab(tab) {
   else if (tab === 'articles' || tab === 'stock') await Promise.all([loadAdminProducts(), loadCategories(), loadDepositTypes()]);
   else if (tab === 'deposit') await loadDepositTypes();
   else if (tab === 'comp') await loadCompAccounts();
+  else if (tab === 'invoice') await loadInvoiceTab();
   else if (tab === 'users') await Promise.all([loadUsers(), loadCategories()]);
   else if (tab === 'registers') await Promise.all([loadRegisters(), loadCategories()]);
   else if (tab === 'journal') await loadJournal(null);
@@ -846,13 +900,18 @@ function renderPos() {
   const comp = state.payment === 'comp';
   const compAccount = comp ? state.compAccounts.find((a) => a.id === state.compAccountId) : null;
   const compHasReturn = comp && state.cart.some((l) => l.kind === 'return');
+  const invoice = state.payment === 'invoice';
+  const invoiceAccount = invoice ? state.invoiceAccounts.find((a) => a.id === state.invoiceAccountId) : null;
   const netNegative = total < 0;
   const netZero = total === 0;
   const canPayReady = comp
     ? !!compAccount && !compHasReturn
+    : invoice ? !!invoiceAccount
     : (netNegative || netZero ? true : (state.payment === 'card' || state.tender >= total));
   const checkoutLabel = comp
     ? (compAccount ? 'Ohne Berechnung buchen · ' + compAccount.name : 'Bereich wählen')
+    : invoice
+    ? (!invoiceAccount ? 'Firma wählen' : total < 0 ? 'Gutschrift buchen · ' + invoiceAccount.code + ' · ' + eur(-total) : 'Auf Rechnung buchen · ' + invoiceAccount.code + ' · ' + eur(total))
     : netNegative
     ? 'Auszahlen · ' + eur(Math.abs(total))
     : netZero
@@ -882,11 +941,19 @@ function renderPos() {
         <div class="row-between subtotal-row"><span>${comp ? 'Warenwert' : 'Zwischensumme'}</span><span class="mono">${eur(sub)}</span></div>
         ${comp ? '' : `<div class="row-between discount-row"><div class="discount-chips">${discountChips}</div><span class="discount-value mono">${disc ? '−' + eur(disc) : ''}</span></div>`}
         ${pfand ? `<div class="row-between pfand-row"><span>${pfand < 0 ? 'Pfand-Rückgabe' : 'zzgl. Pfand'}</span><span class="mono ${pfand < 0 ? 'negative' : ''}">${eur(pfand)}</span></div>` : ''}
-        <div class="row-between total-row"><span class="label">${comp ? 'Ohne Berechnung' : netNegative ? 'Auszahlung an Kunde' : 'Zu zahlen'}</span><span class="value mono ${netNegative ? 'negative' : ''}">${eur(Math.abs(total))}</span></div>
-        ${state.settings.cardEnabled || state.compAccounts.length ? `<div class="pay-switch">
+        <div class="row-between total-row"><span class="label">${comp ? 'Ohne Berechnung' : invoice ? (netNegative ? 'Gutschrift für Firma' : 'Auf Rechnung') : netNegative ? 'Auszahlung an Kunde' : 'Zu zahlen'}</span><span class="value mono ${netNegative ? 'negative' : ''}">${eur(Math.abs(total))}</span></div>
+        ${state.settings.cardEnabled || state.compAccounts.length || state.invoiceAccounts.length ? `<div class="pay-switch">
           <button data-action="set-payment" data-value="cash" class="${state.payment === 'cash' ? 'active' : ''}">Bar</button>
           ${state.settings.cardEnabled ? `<button data-action="set-payment" data-value="card" class="${state.payment === 'card' ? 'active' : ''}">Karte</button>` : ''}
+          ${state.invoiceAccounts.length ? `<button data-action="set-payment" data-value="invoice" class="${invoice ? 'active' : ''}">Rechnung</button>` : ''}
           ${state.compAccounts.length ? `<button data-action="set-payment" data-value="comp" class="${comp ? 'active' : ''}">Ohne Berechnung</button>` : ''}
+        </div>` : ''}
+        ${invoice ? `<div class="comp-box invoice-box">
+          <div class="comp-box-label">Auf welche Firma?</div>
+          <div class="comp-chips">${state.invoiceAccounts.map((a) => `<button data-action="set-invoice-account" data-id="${a.id}" title="${esc(a.name)}" class="comp-chip invoice-chip ${state.invoiceAccountId === a.id ? 'active' : ''}">${esc(a.code)}</button>`).join('')}</div>
+          <div class="invoice-picked">${invoiceAccount ? esc(invoiceAccount.name) : 'Kürzel antippen'}</div>
+          <input id="invoice-ref" class="invoice-ref" maxlength="120" placeholder="Vermerk (optional), z. B. wer bestellt hat" value="${esc(state.invoiceRef)}" autocomplete="off">
+          <div class="comp-box-hint">Zählt zum Umsatz · kommt nicht in die Kasse · erscheint in der Abrechnung der Firma${state.cart.some((l) => l.kind === 'return') ? ' · Pfand-Rückgabe wird der Firma gutgeschrieben, nicht bar ausgezahlt' : ''}</div>
         </div>` : ''}
         ${comp ? `<div class="comp-box">
           <div class="comp-box-label">Auf welchen Bereich buchen?</div>
@@ -907,20 +974,23 @@ function renderPos() {
             <div class="change-breakdown">${change > 0 ? breakdown(change) : (state.tender > 0 && total > 0 ? (change < 0 ? 'fehlen ' + eur(-change) : 'passend') : '')}</div>
           </div>
         </div>` : ''}
-        ${netNegative ? `<div class="payout-hint">Wird bar ausgezahlt</div>` : ''}
+        ${netNegative && !invoice ? `<div class="payout-hint">Wird bar ausgezahlt</div>` : ''}
       </div>
       <div class="cart-footer">
         <button data-action="checkout" class="checkout-btn ${state.cart.length && canPayReady ? 'ready' : ''} ${!state.cart.length ? 'empty' : ''}">${esc(checkoutLabel)}</button>
       </div>
     </aside>
   </div>`;
+  // Typing the Vermerk only updates state — re-rendering would drop the keyboard focus.
+  const refInput = document.getElementById('invoice-ref');
+  if (refInput) refInput.addEventListener('input', () => { state.invoiceRef = refInput.value; });
 }
 
 /* ---------------------------------------------------------------------
  * Rendering — Admin
  * ------------------------------------------------------------------- */
 function adminTabsList() {
-  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['deposit', 'Pfand'], ['comp', 'Ohne Berechnung'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['registers', 'Kassen'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
+  const tabs = [['overview', 'Übersicht'], ['analytics', 'Auswertungen'], ['groups', 'Artikelgruppen'], ['deposit', 'Pfand'], ['comp', 'Ohne Berechnung'], ['invoice', 'Auf Rechnung'], ['articles', 'Artikel'], ['stock', 'Bestand'], ['users', 'Benutzer'], ['registers', 'Kassen'], ['journal', 'Journal'], ['cash', 'Kasse'], ['settings', 'Einstellungen']];
   return tabs.filter((t) => t[0] !== 'stock' || state.settings.trackStock);
 }
 
@@ -939,7 +1009,7 @@ function renderOverviewTab() {
   const dayMax = Math.max(1, ...a.daily.map((d) => d.totalCents));
   const hourMax = Math.max(1, ...a.hourly.map((h) => h.totalCents));
   const rankMax = Math.max(1, ...a.ranking.map((r) => r.revenueCents));
-  const allTotal = a.payments.cash.sumCents + a.payments.card.sumCents;
+  const allTotal = a.payments.cash.sumCents + a.payments.card.sumCents + (a.payments.invoice?.sumCents || 0);
 
   return registerPicker('set-report-register', state.reportRegister, true) + `
     <div class="kpi-grid">${kpiCards.map((k) => `<div class="kpi-card"><div class="label">${esc(k.label)}</div><div class="value mono">${k.value}</div><div class="sub" style="color:${k.color}">${esc(k.sub)}</div></div>`).join('')}</div>
@@ -970,12 +1040,12 @@ function renderOverviewTab() {
       </div>
       <div class="chart-card">
         <div class="title">Zahlungsarten</div>
-        ${['cash', 'card'].map((k) => {
+        ${['cash', 'card', 'invoice'].filter((k) => k !== 'invoice' || a.payments.invoice?.count).map((k) => {
           const p = a.payments[k];
           const pct = allTotal ? Math.round(p.sumCents / allTotal * 100) : 0;
           return `<div class="pay-row">
-            <div class="pay-row-top"><span class="label">${k === 'cash' ? 'Bar' : 'Karte'}</span><span class="sum mono">${eur(p.sumCents)}</span><span class="pct">${pct}%</span></div>
-            <div class="pay-bar-bg"><div class="pay-bar-fill" style="width:${pct}%;background:${k === 'cash' ? 'var(--ink)' : 'var(--accent)'}"></div></div>
+            <div class="pay-row-top"><span class="label">${{ cash: 'Bar', card: 'Karte', invoice: 'Auf Rechnung' }[k]}</span><span class="sum mono">${eur(p.sumCents)}</span><span class="pct">${pct}%</span></div>
+            <div class="pay-bar-bg"><div class="pay-bar-fill" style="width:${pct}%;background:${k === 'cash' ? 'var(--ink)' : k === 'invoice' ? 'var(--info-text)' : 'var(--accent)'}"></div></div>
             <div class="pay-row-sub">${p.count} Bons</div>
           </div>`;
         }).join('')}
@@ -1033,6 +1103,98 @@ function renderCompTab() {
         <div><div class="title">${esc(a.name)}</div><div class="hint">${a.saleCount} Buchung(en) · Warenwert ${eur(a.valueCents)}</div></div>
         <button data-action="delete-comp-account" data-id="${a.id}" data-name="${esc(a.name)}" class="del">✕</button>
       </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch kein Bereich angelegt · lege z.B. "Band" an, dann erscheint in der Kasse die Zahlart „Ohne Berechnung“.</div>'}
+    </div>`;
+}
+
+/** Verwaltung → Auf Rechnung: Firmen pflegen, offene Bons je Firma abrechnen. */
+function renderInvoiceTab() {
+  const a = state.admin;
+  const accounts = a.invoiceAccounts;
+  if (!accounts) return '<p>Lädt…</p>';
+  if (a.invoiceSel) return renderInvoiceStatement();
+  const visible = accounts.filter((x) => !x.archived || x.openCount);
+  const openSum = visible.reduce((s, x) => s + x.openCents, 0);
+  return `
+    <div class="card-box">
+      <div class="table-head-row" style="padding:0 0 12px">
+        <div><div class="title">Firmen auf Rechnung</div><div class="subtitle">Erscheinen in der Kasse unter „Rechnung“ mit ihrem Kürzel · zählt zum Umsatz, nicht zum Kassenbestand${openSum ? ' · offen gesamt ' + eur(openSum) : ''}</div></div>
+        <button data-action="new-invoice-account" class="btn-primary">+ Neue Firma</button>
+      </div>
+      ${visible.map((x) => `<div class="settings-row" data-action="open-invoice-statement" data-id="${x.id}">
+        <div style="display:flex;gap:12px;align-items:center;min-width:0">
+          <span class="invoice-code">${esc(x.code)}</span>
+          <div style="min-width:0"><div class="title">${esc(x.name)}${x.archived ? ' <span class="hint">(gelöscht)</span>' : ''}</div>
+            <div class="hint">${x.openCount ? `<b style="color:var(--warn-text)">${x.openCount} offene Bon(s) · ${eur(x.openCents)}</b> · seit ${fmtDateTimeShort(x.firstOpenAt)}` : 'nichts offen'}${x.billedCount ? ' · ' + x.billedCount + ' abgerechnet' : ''}</div></div>
+        </div>
+        <div class="row-actions">
+          <button data-action="open-invoice-statement" data-id="${x.id}">Abrechnung</button>
+          ${x.archived ? '' : `<button data-action="edit-invoice-account" data-id="${x.id}">Bearbeiten</button>
+          <button data-action="delete-invoice-account" data-id="${x.id}" data-name="${esc(x.code + ' · ' + x.name)}" class="del">✕</button>`}
+        </div>
+      </div>`).join('') || '<div style="padding:15px 18px;color:var(--text-3);font-size:13px">Noch keine Firma angelegt · lege z.B. „BRW · Brauerei Weber“ an, dann erscheint in der Kasse die Zahlart „Rechnung“.</div>'}
+    </div>`;
+}
+
+function renderInvoiceStatement() {
+  const a = state.admin;
+  const st = a.invoiceStatement;
+  if (!st) return '<p>Lädt…</p>';
+  const acc = st.account, t = st.totals;
+  const q = invoiceStatementQuery();
+  const statusChip = (v, label) => `<button data-action="set-invoice-status" data-value="${v}" class="group-chip ${a.invoiceStatus === v ? 'active' : ''}">${label}</button>`;
+  const openIds = st.sales.filter((s) => !s.billedAt).map((s) => s.id);
+  return `
+    <div style="margin-bottom:10px"><button data-action="close-invoice-statement" class="btn-neutral" style="padding:8px 14px;border-radius:9px;font-size:13px;font-weight:700">← Alle Firmen</button></div>
+    <div class="card-box">
+      <div class="table-head-row" style="padding:0 0 12px;align-items:flex-start">
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span class="invoice-code">${esc(acc.code)}</span>
+          <div><div class="title">${esc(acc.name)}</div>
+            ${acc.address ? `<div class="subtitle" style="white-space:pre-line">${esc(acc.address)}</div>` : ''}
+            ${acc.note ? `<div class="subtitle">${esc(acc.note)}</div>` : ''}</div>
+        </div>
+        <div class="invoice-sum"><div class="subtitle">${t.count} Bon(s)</div><div class="mono">${eur(t.totalCents)}</div></div>
+      </div>
+      <div class="invoice-filter">
+        <div class="group-chips" style="margin:0">${statusChip('open', 'Offen')}${statusChip('billed', 'Abgerechnet')}${statusChip('all', 'Alle')}</div>
+        <label>von <input type="date" id="invoice-from" value="${esc(a.invoiceFrom)}"></label>
+        <label>bis <input type="date" id="invoice-to" value="${esc(a.invoiceTo)}"></label>
+      </div>
+      <div class="invoice-actions">
+        <a class="btn-neutral" href="/api/invoice-accounts/${acc.id}/statement.pdf?${q}" target="_blank" rel="noopener">PDF öffnen</a>
+        <a class="btn-neutral" href="/api/invoice-accounts/${acc.id}/statement.csv?${q}">CSV (Excel)</a>
+        ${openIds.length ? `<button data-action="bill-invoice" class="btn-primary">${openIds.length} Bon(s) als abgerechnet markieren</button>` : ''}
+      </div>
+    </div>
+    <div class="card-box">
+      <div class="title" style="font-size:14px;font-weight:700;margin-bottom:8px">Artikel</div>
+      <table class="inv-table">
+        <thead><tr><th class="num">Menge</th><th>Artikel</th><th class="num">Einzel</th><th class="num">Gesamt</th></tr></thead>
+        <tbody>${st.items.map((i) => `<tr><td class="num mono">${i.qty}×</td><td>${esc(i.name)}</td><td class="num mono">${eur(i.unitCents)}</td><td class="num mono">${eur(i.sumCents)}</td></tr>`).join('')}
+          ${(st.returns || []).map((r) => `<tr style="color:var(--warn-text)"><td class="num mono">${r.qty}×</td><td>↩ Pfand-Rückgabe ${esc(r.name)}</td><td class="num mono">−${eur(r.unitCents)}</td><td class="num mono">−${eur(r.sumCents)}</td></tr>`).join('')}
+          ${st.items.length || (st.returns || []).length ? '' : '<tr><td colspan="4" style="color:var(--text-3)">Keine Bons im gewählten Zeitraum.</td></tr>'}</tbody>
+        <tfoot>
+          <tr><td></td><td>Warenwert</td><td></td><td class="num mono">${eur(t.goodsCents)}</td></tr>
+          ${t.discountCents ? `<tr><td></td><td>Rabatt</td><td></td><td class="num mono">−${eur(t.discountCents)}</td></tr>` : ''}
+          ${t.depositCents ? `<tr><td></td><td>Pfand</td><td></td><td class="num mono">${eur(t.depositCents)}</td></tr>` : ''}
+          ${t.depositReturnedCents ? `<tr><td></td><td>Pfand-Rückgabe (Gutschrift)</td><td></td><td class="num mono">−${eur(t.depositReturnedCents)}</td></tr>` : ''}
+          <tr class="sum"><td></td><td>Summe (brutto)</td><td></td><td class="num mono">${eur(t.totalCents)}</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <div class="card-box">
+      <div class="title" style="font-size:14px;font-weight:700;margin-bottom:8px">Bons</div>
+      <table class="inv-table">
+        <thead><tr><th>Bon</th><th>Datum</th>${multiRegister() ? '<th>Kasse</th>' : ''}<th>Vermerk</th><th>Positionen</th><th class="num">Betrag</th><th>Status</th></tr></thead>
+        <tbody>${st.sales.map((s) => `<tr>
+          <td class="mono"><span class="link" data-action="open-receipt" data-no="${esc(s.receiptNo)}">${esc(s.receiptNo)}</span></td>
+          <td>${fmtDateTimeShort(s.soldAt)}</td>${multiRegister() ? `<td>${esc(s.registerName || '')}</td>` : ''}
+          <td>${esc(s.ref)}</td>
+          <td style="font-size:12px;color:var(--text-2)">${s.lines.map((l) => l.qty + '× ' + esc(l.name)).concat((s.returns || []).map((r) => '↩ ' + r.qty + '× ' + esc(r.name))).join(', ')}</td>
+          <td class="num mono">${eur(s.totalCents)}</td>
+          <td>${s.billedAt ? `abgerechnet ${fmtDateTimeShort(s.billedAt).split(',')[0]}${s.billedRef ? ' · ' + esc(s.billedRef) : ''} <span class="link" data-action="unbill-invoice" data-id="${s.id}" data-no="${esc(s.receiptNo)}">zurücknehmen</span>` : '<b style="color:var(--warn-text)">offen</b>'}</td>
+        </tr>`).join('') || `<tr><td colspan="${multiRegister() ? 7 : 6}" style="color:var(--text-3)">Keine Bons.</td></tr>`}</tbody>
+      </table>
     </div>`;
 }
 
@@ -1264,7 +1426,7 @@ function renderCashTab() {
       ${zReports.length === 0 ? '<div class="z-empty">Noch kein Tagesabschluss gebucht.</div>' : zReports.map((z) => `
         <div class="z-list-item">
           <div class="z-list-top"><span>Z-${z.no} · ${new Date(z.closedAt).toLocaleDateString('de-DE')}</span><span class="mono">${eur(z.totalCents)}</span></div>
-          <div class="z-list-detail">${z.salesCount} Bons · Bar ${eur(z.cashCents)} · Karte ${eur(z.cardCents)}
+          <div class="z-list-detail">${z.salesCount} Bons · Bar ${eur(z.cashCents)} · Karte ${eur(z.cardCents)}${z.invoiceCents ? ' · Rechnung ' + eur(z.invoiceCents) : ''}
             <button data-action="email-zreport" data-id="${z.id}" data-no="${z.no}" class="z-list-email-btn">Per E-Mail senden</button>
           </div>
         </div>`).join('')}
@@ -1333,13 +1495,14 @@ function renderSettingsTab() {
 
 function renderAdmin() {
   const tabs = adminTabsList();
-  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', deposit: 'Pfand', comp: 'Ohne Berechnung', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', registers: 'Kassen', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
+  const tabLabels = { overview: 'Übersicht', analytics: 'Auswertungen', groups: 'Artikelgruppen', deposit: 'Pfand', comp: 'Ohne Berechnung', invoice: 'Auf Rechnung', articles: 'Artikel', stock: 'Bestand', users: 'Benutzer', registers: 'Kassen', journal: 'Journal', cash: 'Kasse', settings: 'Einstellungen' };
   let content = '';
   if (state.adminTab === 'overview') content = renderOverviewTab();
   else if (state.adminTab === 'analytics') content = renderAnalyticsTab();
   else if (state.adminTab === 'groups') content = renderGroupsTab();
   else if (state.adminTab === 'deposit') content = renderDepositTab();
   else if (state.adminTab === 'comp') content = renderCompTab();
+  else if (state.adminTab === 'invoice') content = renderInvoiceTab();
   else if (state.adminTab === 'articles') content = renderArticlesTab();
   else if (state.adminTab === 'stock') content = renderStockTab();
   else if (state.adminTab === 'users') content = renderUsersTab();
@@ -1375,6 +1538,12 @@ function renderAdmin() {
       } catch (e) { showToast(e.message); }
     });
   }
+  if (state.adminTab === 'invoice') {
+    for (const [id, key] of [['invoice-from', 'invoiceFrom'], ['invoice-to', 'invoiceTo']]) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', async () => { state.admin[key] = el.value; await loadInvoiceStatement(); renderMain(); });
+    }
+  }
   if (state.adminTab === 'articles') {
     const fileInput = document.getElementById('import-file-input');
     if (fileInput) fileInput.addEventListener('change', () => importArticlesFile(fileInput.files[0]));
@@ -1403,7 +1572,10 @@ function renderReceiptOverlay() {
     if (rc.depositCents) rows.push({ label: 'zzgl. Pfand', value: eur(rc.depositCents), weight: 500, size: '13px' });
   }
   if (rc.depositReturnedCents) rows.push({ label: 'Pfand-Rückgabe', value: '−' + eur(rc.depositReturnedCents), weight: 500, size: '13px' });
-  if (rc.payment === 'comp') {
+  if (rc.payment === 'invoice') {
+    rows.push({ label: (net < 0 ? 'Gutschrift auf Rechnung · ' : 'Auf Rechnung · ') + (rc.invoiceCode || '') + (rc.invoiceName ? ' · ' + rc.invoiceName : ''), value: eur(Math.abs(net)), weight: 800, size: '17px' });
+    if (rc.invoiceRef) rows.push({ label: 'Vermerk: ' + rc.invoiceRef, value: '', weight: 500, size: '12px' });
+  } else if (rc.payment === 'comp') {
     rows.length = 0;
     rows.push({ label: 'Warenwert', value: eur(rc.subtotalCents), weight: 500, size: '13px' });
     rows.push({ label: 'Ohne Berechnung · ' + (rc.compName || '–'), value: eur(0), weight: 800, size: '17px' });
@@ -1421,7 +1593,7 @@ function renderReceiptOverlay() {
       ${rc.voidedAt ? `<div class="receipt-void"><div class="title">Storniert · ${fmtDateTime(rc.voidedAt)}</div><div>${esc(rc.voidReason || '')}</div></div>` : ''}
       <hr class="receipt-divider">
       ${rc.items.map((i) => `<div class="receipt-line"><span class="qty mono">${i.qty}×</span><span class="name">${esc(i.name)}</span><span class="mono">${eur(i.unitCents * i.qty)}</span></div>${i.depositCents ? `<div class="receipt-line" style="color:var(--text-3);font-size:11.5px"><span class="qty"></span><span class="name">davon Pfand ${i.qty}× ${eur(i.depositCents)}</span><span class="mono">${eur(i.depositCents * i.qty)}</span></div>` : ''}`).join('')}
-      ${rc.returns.map((r) => `<div class="receipt-line" style="color:var(--warn-text)"><span class="qty mono">${r.qty}×</span><span class="name">↩ Pfand zurück · ${esc(r.name)}</span><span class="mono">−${eur(r.amountCents)}</span></div>`).join('')}
+      ${rc.returns.map((r) => `<div class="receipt-line" style="color:var(--warn-text)"><span class="qty mono">${r.qty}×</span><span class="name">↩ Pfand zurück · ${esc(r.name)}${r.credited ? ' (Gutschrift)' : ''}</span><span class="mono">−${eur(r.amountCents)}</span></div>`).join('')}
       <hr class="receipt-divider">
       ${rows.map((r) => `<div class="receipt-totals-row" style="font-weight:${r.weight};font-size:${r.size}"><span>${esc(r.label)}</span><span class="mono">${r.value}</span></div>`).join('')}
       <div class="receipt-footer"><div class="thanks">Vielen Dank für Ihren Einkauf</div>${state.view === 'admin' && canUseAdmin() && rc.voidable ? `<button data-action="void-receipt" data-no="${esc(rc.receiptNo)}" class="receipt-void-btn">Bon stornieren</button>` : ''}<button data-action="close-receipt">Weiter</button></div>
@@ -1498,6 +1670,18 @@ function renderFormOverlay() {
     hint = f.id ? 'Der neue Name gilt für künftige Buchungen; bereits gebuchte behalten den alten.' : 'Wer bekommt Ware, ohne zu zahlen? Z. B. Band, Helfer, Ehrengäste.';
     fields = F('Name', 'name', 'z. B. Band');
     submitLabel = f.id ? 'Speichern' : 'Anlegen';
+  } else if (f.kind === 'invoice-account') {
+    title = f.id ? 'Firma bearbeiten' : 'Neue Firma auf Rechnung';
+    hint = f.id ? 'Änderungen gelten für künftige Buchungen; bereits gebuchte Bons behalten Kürzel und Namen.' : 'Das Kürzel erscheint als Button in der Kasse — kurz halten, z. B. BRW.';
+    fields = F('Kürzel (max. 12 Zeichen)', 'code', 'z. B. BRW') + F('Firmenname', 'name', 'z. B. Brauerei Weber GmbH');
+    fields += `<div class="form-field"><label>Anschrift (für die Rechnung, optional)</label><textarea data-form-key="address" rows="3" maxlength="1000" placeholder="Straße&#10;PLZ Ort">${esc(f.address || '')}</textarea></div>`;
+    fields += F('Notiz (optional)', 'note', 'z. B. Ansprechpartner, Kundennummer');
+    submitLabel = f.id ? 'Speichern' : 'Anlegen';
+  } else if (f.kind === 'invoice-bill') {
+    title = 'Als abgerechnet markieren';
+    hint = `${f.count} Bon(s) über ${eur(f.totalCents)} für ${f.accountLabel}. Danach stehen sie nicht mehr unter „Offen“ und können nicht mehr storniert werden. Rücknahme ist pro Bon möglich.`;
+    fields = F('Rechnungsnummer (optional)', 'billedRef', 'z. B. RE-2026-017');
+    submitLabel = 'Abgerechnet';
   } else if (f.kind === 'deposit-type') {
     title = f.id ? 'Pfand-Option bearbeiten' : 'Neue Pfand-Option';
     fields = F('Name', 'name', 'z. B. Krug') + F('Betrag (€)', 'amount', '3,00');
@@ -1661,8 +1845,11 @@ function onAction(e) {
       if (d.value !== 'cash') state.tender = 0;
       // The Bereich is picked fresh for every booking, unless there's only one to pick from.
       state.compAccountId = d.value === 'comp' && state.compAccounts.length === 1 ? state.compAccounts[0].id : null;
+      state.invoiceAccountId = d.value === 'invoice' && state.invoiceAccounts.length === 1 ? state.invoiceAccounts[0].id : null;
+      if (d.value !== 'invoice') state.invoiceRef = '';
       return renderMain();
     case 'set-comp-account': state.compAccountId = Number(d.id); return renderMain();
+    case 'set-invoice-account': state.invoiceAccountId = Number(d.id); return renderMain();
     case 'add-tender': state.tender += Number(d.value); return renderMain();
     case 'exact-amount': state.tender = totals().total; return renderMain();
     case 'clear-tender': state.tender = 0; return renderMain();
@@ -1745,6 +1932,47 @@ function onAction(e) {
         await api('/deposit-types/' + d.id, { method: 'DELETE' });
         showToast('Pfand-Option gelöscht');
         await loadDepositTypes();
+        renderMain();
+      },
+    });
+    case 'new-invoice-account': return openForm({ kind: 'invoice-account', code: '', name: '', address: '', note: '' });
+    case 'edit-invoice-account': {
+      const a = (state.admin.invoiceAccounts || []).find((x) => x.id === Number(d.id));
+      if (!a) return;
+      return openForm({ kind: 'invoice-account', id: a.id, code: a.code, name: a.name, address: a.address, note: a.note });
+    }
+    case 'delete-invoice-account': return openForm({
+      kind: 'confirm', noCode: true, title: 'Firma löschen · ' + d.name,
+      hint: 'Die Firma verschwindet aus der Kasse. Abgerechnete Bons bleiben in Journal und Auswertung. Geht nur, wenn nichts mehr offen ist.',
+      submitLabel: 'Firma löschen',
+      action: async () => {
+        await api('/invoice-accounts/' + d.id, { method: 'DELETE' });
+        showToast('Firma gelöscht');
+        await Promise.all([loadInvoiceAccounts(), loadBootstrap()]);
+        renderMain();
+      },
+    });
+    case 'open-invoice-statement':
+      state.admin.invoiceSel = Number(d.id); state.admin.invoiceStatus = 'open'; state.admin.invoiceFrom = ''; state.admin.invoiceTo = ''; state.admin.invoiceStatement = null;
+      renderMain();
+      return void loadInvoiceStatement().then(renderMain);
+    case 'close-invoice-statement': state.admin.invoiceSel = null; state.admin.invoiceStatement = null; return void loadInvoiceTab();
+    case 'set-invoice-status': state.admin.invoiceStatus = d.value; return void loadInvoiceStatement().then(renderMain);
+    case 'bill-invoice': {
+      const st = state.admin.invoiceStatement;
+      if (!st) return;
+      const open = st.sales.filter((s) => !s.billedAt);
+      return openForm({ kind: 'invoice-bill', accountId: st.account.id, accountLabel: st.account.code + ' · ' + st.account.name, saleIds: open.map((s) => s.id),
+        count: open.length, totalCents: open.reduce((s, x) => s + x.totalCents, 0), billedRef: '' });
+    }
+    case 'unbill-invoice': return openForm({
+      kind: 'confirm', noCode: true, title: 'Abrechnung zurücknehmen · Bon ' + d.no,
+      hint: 'Der Bon steht danach wieder unter „Offen“ und kommt auf die nächste Abrechnung.',
+      submitLabel: 'Zurücknehmen',
+      action: async () => {
+        await api('/invoice-accounts/' + state.admin.invoiceSel + '/unbill', { method: 'POST', body: { saleIds: [Number(d.id)] } });
+        showToast('Bon ' + d.no + ' wieder offen');
+        await Promise.all([loadInvoiceAccounts(), loadInvoiceStatement()]);
         renderMain();
       },
     });

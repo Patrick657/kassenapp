@@ -7,6 +7,7 @@ use Festkasse\Repo\AuditRepo;
 use Festkasse\Repo\CashRepo;
 use Festkasse\Repo\CategoryRepo;
 use Festkasse\Repo\CompAccountRepo;
+use Festkasse\Repo\InvoiceAccountRepo;
 use Festkasse\Repo\DepositTypeRepo;
 use Festkasse\Repo\JournalRepo;
 use Festkasse\Repo\MaintenanceRepo;
@@ -27,6 +28,7 @@ final class Api
     private CategoryRepo $categories;
     private DepositTypeRepo $depositTypes;
     private CompAccountRepo $compAccounts;
+    private InvoiceAccountRepo $invoiceAccounts;
     private CashRepo $cash;
     private SaleRepo $sales;
     private ZReportRepo $zReports;
@@ -52,6 +54,7 @@ final class Api
         $this->categories = new CategoryRepo($db);
         $this->depositTypes = new DepositTypeRepo($db);
         $this->compAccounts = new CompAccountRepo($db);
+        $this->invoiceAccounts = new InvoiceAccountRepo($db);
         $this->cash = new CashRepo($db);
         $this->sales = new SaleRepo($db, $this->products, $this->cash);
         $this->zReports = new ZReportRepo($db, $this->cash);
@@ -401,6 +404,57 @@ final class Api
             }
         }
 
+        // ---- Auf Rechnung: Firmen und Abrechnung (Verwaltung) ----
+        if ($path === '/api/invoice-accounts') {
+            $this->auth->requireAccess();
+            if ($method === 'GET') {
+                return $this->invoiceAccounts->list();
+            }
+            if ($method === 'POST') {
+                $b = Support::jsonBody();
+                $id = $this->invoiceAccounts->create($b);
+                $this->audit->log('invoice_account.create', 'Firma auf Rechnung angelegt: ' . trim((string) ($b['code'] ?? '')) . ' · ' . trim((string) ($b['name'] ?? '')));
+                return ['id' => $id];
+            }
+        }
+
+        if (preg_match('#^/api/invoice-accounts/(\d+)$#', $path, $m)) {
+            $id = (int) $m[1];
+            $this->auth->requireAccess();
+            if ($method === 'PATCH') {
+                $this->invoiceAccounts->update($id, Support::jsonBody());
+                return ['ok' => true];
+            }
+            if ($method === 'DELETE') {
+                $this->invoiceAccounts->archive($id);
+                $this->audit->log('invoice_account.archive', 'Firma auf Rechnung gelöscht (archiviert): #' . $id);
+                return ['ok' => true];
+            }
+        }
+
+        if ($method === 'GET' && preg_match('#^/api/invoice-accounts/(\d+)/statement(?:\.(pdf|csv))?$#', $path, $m)) {
+            $this->auth->requireAccess();
+            $status = in_array($_GET['status'] ?? 'open', ['open', 'billed', 'all'], true) ? (string) ($_GET['status'] ?? 'open') : 'open';
+            $st = $this->invoiceAccounts->statement((int) $m[1], $status, $_GET['from'] ?? null, $_GET['to'] ?? null);
+            if (($m[2] ?? '') === 'pdf') {
+                $this->outputStatementPdf($st);
+            }
+            if (($m[2] ?? '') === 'csv') {
+                $this->outputStatementCsv($st);
+            }
+            return $st;
+        }
+
+        if ($method === 'POST' && preg_match('#^/api/invoice-accounts/(\d+)/(bill|unbill)$#', $path, $m)) {
+            $this->auth->requireAccess();
+            $b = Support::jsonBody();
+            $billed = $m[2] === 'bill';
+            $n = $this->invoiceAccounts->setBilled((int) $m[1], (array) ($b['saleIds'] ?? []), $billed, (string) ($b['billedRef'] ?? ''));
+            $this->audit->log($billed ? 'invoice.bill' : 'invoice.unbill', ($billed ? 'Abgerechnet' : 'Abrechnung zurückgenommen') . ': ' . $n . ' Bon(s) · Firma #' . $m[1]
+                . ($billed && trim((string) ($b['billedRef'] ?? '')) !== '' ? ' · Rechnung ' . trim((string) $b['billedRef']) : ''));
+            return ['changed' => $n];
+        }
+
         if ($method === 'POST' && $path === '/api/products') {
             $this->auth->requireAccess();
             return $this->createProduct();
@@ -558,6 +612,8 @@ final class Api
                 static fn ($c) => ['id' => $c['id'], 'name' => $c['name']],
                 $this->compAccounts->list()
             ),
+            // Firmen "auf Rechnung" — Kürzel for the buttons, name to confirm the choice.
+            'invoiceAccounts' => $this->invoiceAccounts->forPos(),
             'cashBalanceCents' => $register !== null ? $this->cash->balanceCents($register['id']) : 0,
             'todayRevenueCents' => $today,
             // This device's Kasse (null = several exist and it isn't assigned yet: POS can't sell),
@@ -944,6 +1000,15 @@ final class Api
             }
         }
 
+        // "Auf Rechnung": same — only the Firma's id is taken from the client.
+        $invoiceAccount = null;
+        if ($payment === 'invoice') {
+            $invoiceAccount = $this->invoiceAccounts->findActive((int) ($b['invoiceAccountId'] ?? 0));
+            if ($invoiceAccount === null) {
+                throw new ApiException(400, 'Bitte eine Firma für die Buchung auf Rechnung wählen');
+            }
+        }
+
         $trackStock = $this->settings->bool('track_stock', true);
         return $this->sales->create(
             $register['id'],
@@ -954,7 +1019,9 @@ final class Api
             $trackStock,
             $clientUuid,
             $returnLines,
-            $compAccount
+            $compAccount,
+            $invoiceAccount,
+            (string) ($b['invoiceRef'] ?? '')
         );
     }
 
@@ -1099,6 +1166,9 @@ final class Api
         $pdf->addLine('Zahlungsarten', true);
         $pdf->addLine('Bar: ' . Support::eur($payments['cash']['sumCents']) . ' (' . $payments['cash']['count'] . ' Bons)');
         $pdf->addLine('Karte: ' . Support::eur($payments['card']['sumCents']) . ' (' . $payments['card']['count'] . ' Bons)');
+        if ($payments['invoice']['count'] > 0) {
+            $pdf->addLine('Auf Rechnung: ' . Support::eur($payments['invoice']['sumCents']) . ' (' . $payments['invoice']['count'] . ' Bons)');
+        }
         $pdf->addSpacer();
 
         $pdf->addLine('Artikelgruppen', true);
@@ -1155,7 +1225,8 @@ final class Api
             [
                 ['text' => 'Endstand: ' . Support::eur($z['totalCents']), 'bold' => true, 'size' => 13.0],
                 ['text' => $period],
-                ['text' => 'Bar ' . Support::eur($z['cashCents']) . ' · Karte ' . Support::eur($z['cardCents']) . ' · ' . $z['salesCount'] . ' Bon(s)'],
+                ['text' => 'Bar ' . Support::eur($z['cashCents']) . ' · Karte ' . Support::eur($z['cardCents'])
+                    . ($z['invoiceCents'] > 0 ? ' · Auf Rechnung ' . Support::eur($z['invoiceCents']) : '') . ' · ' . $z['salesCount'] . ' Bon(s)'],
             ],
             [0.10, 0.15, 0.35]
         );
@@ -1173,7 +1244,7 @@ final class Api
         foreach ($sales as $s) {
             $pdf->addSplitLine(
                 Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
-                . Support::padDisplay($s['payment'] === 'card' ? 'Karte' : 'Bar', 10),
+                . Support::padDisplay(match ($s['payment']) { 'card' => 'Karte', 'invoice' => 'Re. ' . ($s['invoiceCode'] ?? ''), default => 'Bar' }, 10),
                 Support::eur($s['totalCents']),
                 leftColor: Pdf::GREEN,
                 rightColor: Pdf::GREEN
@@ -1202,6 +1273,134 @@ final class Api
         );
         $this->audit->log('zreport.email', $shopName . ' Z-' . $z['no'] . ' per E-Mail an ' . implode(', ', $to));
         return ['ok' => true];
+    }
+
+    /** Abrechnung of one Firma as PDF — the basis for writing the invoice. */
+    private function outputStatementPdf(array $st): never
+    {
+        $acc = $st['account'];
+        $shopName = $this->settings->forClient()['shopName'];
+        $statusText = ['open' => 'offene Bons', 'billed' => 'abgerechnete Bons', 'all' => 'alle Bons'][$st['status']];
+        $range = ($st['from'] || $st['to'])
+            ? ' · ' . ($st['from'] ? date('d.m.Y', strtotime($st['from'])) : '…') . ' – ' . ($st['to'] ? date('d.m.Y', strtotime($st['to'])) : '…')
+            : '';
+
+        $pdf = new Pdf($shopName . ' · Abrechnung auf Rechnung');
+        $pdf->addBanner(
+            [
+                ['text' => $acc['code'] . ' · ' . $acc['name'], 'bold' => true, 'size' => 13.0],
+                ['text' => 'Summe: ' . Support::eur($st['totals']['totalCents']) . ' · ' . $st['totals']['count'] . ' Bon(s) · ' . $statusText . $range],
+                ['text' => 'Erstellt ' . date('d.m.Y H:i') . ' Uhr'],
+            ],
+            [0.10, 0.15, 0.35]
+        );
+        if ($acc['address'] !== '') {
+            foreach (explode("\n", $acc['address']) as $line) {
+                $pdf->addLine($line);
+            }
+            $pdf->addSpacer();
+        }
+
+        $pdf->addLine('Artikel', true);
+        $pdf->addSplitLine(Support::padDisplay('Menge', 8) . Support::padDisplay('Artikel', 44) . Support::padDisplayRight('Einzel', 12), 'Gesamt', bold: true);
+        $pdf->addRule();
+        foreach ($st['items'] as $i) {
+            $pdf->addSplitLine(
+                Support::padDisplay($i['qty'] . '×', 8) . Support::padDisplay($i['name'], 44) . Support::padDisplayRight(Support::eur($i['unitCents']), 12),
+                Support::eur($i['sumCents'])
+            );
+        }
+        foreach ($st['returns'] as $r) {
+            $pdf->addSplitLine(
+                Support::padDisplay($r['qty'] . '×', 8) . Support::padDisplay('Pfand-Rückgabe ' . $r['name'], 44) . Support::padDisplayRight('-' . Support::eur($r['unitCents']), 12),
+                '-' . Support::eur($r['sumCents'])
+            );
+        }
+        $pdf->addRule();
+        $t = $st['totals'];
+        $pdf->addSplitLine('Warenwert', Support::eur($t['goodsCents']));
+        if ($t['discountCents']) {
+            $pdf->addSplitLine('Rabatt', '-' . Support::eur($t['discountCents']));
+        }
+        if ($t['depositCents']) {
+            $pdf->addSplitLine('Pfand', Support::eur($t['depositCents']));
+        }
+        if ($t['depositReturnedCents']) {
+            $pdf->addSplitLine('Pfand-Rückgabe (Gutschrift)', '-' . Support::eur($t['depositReturnedCents']));
+        }
+        $pdf->addSplitLine('Summe (brutto)', Support::eur($t['totalCents']), bold: true);
+        $pdf->addSpacer();
+
+        $pdf->addLine('Bons', true);
+        $pdf->addSplitLine(Support::padDisplay('Bon-Nr.', 15) . Support::padDisplay('Datum/Zeit', 17) . 'Vermerk', 'Betrag', bold: true);
+        $pdf->addRule();
+        foreach ($st['sales'] as $s) {
+            $pdf->addSplitLine(
+                Support::padDisplay($s['receiptNo'], 15) . Support::padDisplay((new \DateTime($s['soldAt']))->format('d.m.Y H:i'), 17)
+                . Support::padDisplay($s['ref'] . ($s['billedRef'] !== '' ? ' (Re. ' . $s['billedRef'] . ')' : ''), 40),
+                Support::eur($s['totalCents']),
+                bold: true
+            );
+            foreach ($s['lines'] as $l) {
+                $pdf->addSplitLine('  ' . Support::padDisplay($l['qty'] . '× ' . $l['name'], 60), Support::eur($l['qty'] * $l['unitCents']));
+            }
+            if ($s['discountCents']) {
+                $pdf->addSplitLine('  Rabatt', '-' . Support::eur($s['discountCents']));
+            }
+            if ($s['depositCents']) {
+                $pdf->addSplitLine('  Pfand', Support::eur($s['depositCents']));
+            }
+            foreach ($s['returns'] as $r) {
+                $pdf->addSplitLine('  ' . Support::padDisplay($r['qty'] . '× Pfand-Rückgabe ' . $r['name'], 60), '-' . Support::eur($r['amountCents']));
+            }
+            $pdf->addRule();
+        }
+        if (empty($st['sales'])) {
+            $pdf->addLine('Keine Bons im gewählten Zeitraum.');
+        }
+
+        $filename = 'Abrechnung-' . self::fileSafe($acc['code']) . '-' . date('Y-m-d') . '.pdf';
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: inline; filename="' . $filename . '"');
+        header('Cache-Control: no-store');
+        echo $pdf->output();
+        exit;
+    }
+
+    /** Same Abrechnung as CSV (one row per article line of each Bon) for Excel or the invoicing program. */
+    private function outputStatementCsv(array $st): never
+    {
+        $filename = 'Abrechnung-' . self::fileSafe($st['account']['code']) . '-' . date('Y-m-d') . '.csv';
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Cache-Control: no-store');
+        echo "\xEF\xBB\xBF";
+        $out = fopen('php://output', 'w');
+        $money = static fn (int $c) => number_format($c / 100, 2, ',', '');
+        fputcsv($out, ['Kuerzel', 'Firma', 'Bon', 'Datum', 'Kasse', 'Vermerk', 'Menge', 'Artikel', 'Einzelpreis', 'Pfand_je_Stueck', 'Gesamt', 'Abgerechnet_am', 'Rechnungsnummer'], ';');
+        foreach ($st['sales'] as $s) {
+            foreach ($s['lines'] as $l) {
+                fputcsv($out, [
+                    $st['account']['code'], $st['account']['name'], $s['receiptNo'], (new \DateTime($s['soldAt']))->format('d.m.Y H:i'),
+                    $s['registerName'] ?? '', $s['ref'], (string) $l['qty'], $l['name'], $money($l['unitCents']), $money($l['depositCents']),
+                    $money($l['qty'] * ($l['unitCents'] + $l['depositCents'])),
+                    $s['billedAt'] ? (new \DateTime($s['billedAt']))->format('d.m.Y') : '', $s['billedRef'],
+                ], ';');
+            }
+            foreach ($s['returns'] as $r) {
+                fputcsv($out, [$st['account']['code'], $st['account']['name'], $s['receiptNo'], (new \DateTime($s['soldAt']))->format('d.m.Y H:i'),
+                    $s['registerName'] ?? '', $s['ref'], (string) $r['qty'], 'Pfand-Rückgabe ' . $r['name'],
+                    '-' . $money($r['qty'] > 0 ? intdiv($r['amountCents'], $r['qty']) : $r['amountCents']), '0,00', '-' . $money($r['amountCents']),
+                    $s['billedAt'] ? (new \DateTime($s['billedAt']))->format('d.m.Y') : '', $s['billedRef']], ';');
+            }
+            if ($s['discountCents']) {
+                fputcsv($out, [$st['account']['code'], $st['account']['name'], $s['receiptNo'], (new \DateTime($s['soldAt']))->format('d.m.Y H:i'),
+                    $s['registerName'] ?? '', $s['ref'], '1', 'Rabatt', '-' . $money($s['discountCents']), '0,00', '-' . $money($s['discountCents']),
+                    $s['billedAt'] ? (new \DateTime($s['billedAt']))->format('d.m.Y') : '', $s['billedRef']], ';');
+            }
+        }
+        fclose($out);
+        exit;
     }
 
     private static function fileSafe(string $name): string

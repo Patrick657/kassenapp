@@ -169,6 +169,25 @@ a { color: var(--accent); }
 .comp-chip { padding: 11px 14px; border-radius: 9px; font-size: 13.5px; font-weight: 700; background: #fff; color: var(--ink); }
 .comp-chip.active { background: var(--ink); color: #fff; }
 .comp-box-hint { font-size: 11.5px; color: var(--info-text); margin-top: 7px; }
+/* Auf Rechnung: Kürzel-Buttons in the Kasse, Firmen + Abrechnung in the Verwaltung */
+.invoice-box { background: var(--warn-fill); }
+.invoice-box .comp-box-label, .invoice-box .comp-box-hint { color: var(--warn-text); }
+.invoice-chip { min-width: 58px; letter-spacing: .03em; }
+.invoice-picked { font-size: 12.5px; font-weight: 600; margin-top: 7px; color: var(--ink); }
+.invoice-ref { width: 100%; margin-top: 7px; padding: 9px 10px; border-radius: 8px; border: 1.5px solid var(--field-border); font: inherit; font-size: 13px; background: #fff; }
+.invoice-code { display: inline-flex; align-items: center; justify-content: center; min-width: 52px; padding: 6px 9px; border-radius: 8px; background: var(--ink); color: #fff; font-weight: 800; font-size: 12.5px; letter-spacing: .03em; flex: none; }
+.invoice-sum { text-align: right; } .invoice-sum .mono { font-size: 20px; font-weight: 800; }
+.invoice-filter { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 4px 0 10px; }
+.invoice-filter label { font-size: 12px; color: var(--text-3); display: flex; gap: 6px; align-items: center; }
+.invoice-filter input { padding: 6px 8px; border-radius: 8px; border: 1.5px solid var(--field-border); font: inherit; font-size: 12.5px; }
+.invoice-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.invoice-actions a.btn-neutral { padding: 11px 16px; border-radius: 10px; font-size: 13px; font-weight: 700; color: var(--ink); text-decoration: none; }
+.inv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.inv-table th { text-align: left; font-size: 11px; color: var(--text-3); font-weight: 700; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.inv-table td { padding: 7px 8px; border-bottom: 1px solid rgba(0,0,0,.05); vertical-align: top; }
+.inv-table .num { text-align: right; white-space: nowrap; }
+.inv-table tfoot td { border-bottom: none; color: var(--text-2); }
+.inv-table tfoot tr.sum td { font-weight: 800; color: var(--ink); border-top: 1.5px solid var(--border); }
 .notes-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .notes-grid button { padding: 12px 2px; border-radius: 10px; background: var(--ink); color: #fff; font-size: 13px; font-weight: 600; }
 .notes-grid button:active { transform: scale(.95); }

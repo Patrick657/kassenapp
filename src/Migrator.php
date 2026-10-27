@@ -20,7 +20,7 @@ use PDO;
  */
 final class Migrator
 {
-    private const LATEST_VERSION = 14;
+    private const LATEST_VERSION = 16;
 
     private const CASH_MOVEMENT_TYPE_ENUM = "ENUM('sale','in','out','close','delivery','deposit_return','comp','void')";
 
@@ -119,6 +119,22 @@ final class Migrator
                 $this->setVersion(14);
             } catch (\Throwable $e) {
                 error_log('[Festkasse Migrator] v14 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 15) {
+            try {
+                $this->migrateToV15();
+                $this->setVersion(15);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v15 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
+            }
+        }
+        if ($current < 16) {
+            try {
+                $this->migrateToV16();
+                $this->setVersion(16);
+            } catch (\Throwable $e) {
+                error_log('[Festkasse Migrator] v16 fehlgeschlagen, wird beim nächsten Request erneut versucht: ' . $e->getMessage());
             }
         }
     }
@@ -428,6 +444,56 @@ final class Migrator
             $this->db->exec('ALTER TABLE z_reports DROP INDEX `' . str_replace('`', '', (string) $indexName) . '`');
         }
         $this->ensureIndex('z_reports', 'uq_z_reports_register_no', 'ALTER TABLE z_reports ADD UNIQUE INDEX uq_z_reports_register_no (register_id, no)');
+    }
+
+    /**
+     * "Auf Rechnung": goods sold to a Firma that pays later by invoice. Unlike "ohne Berechnung"
+     * this IS revenue (Umsatz, journal), but no money enters the drawer — like a card payment.
+     * Firmen (invoice_accounts) have a short Kürzel shown as a button in the Kasse. Code and name
+     * are frozen on the sale (same idea as comp_name). billed_at/billed_ref mark which Bons have
+     * already gone onto a written invoice, so nothing is billed twice. archived_at hides a Firma
+     * from the Kasse without losing its history.
+     */
+    private function migrateToV15(): void
+    {
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS invoice_accounts (
+                id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                code        VARCHAR(12)  NOT NULL,
+                name        VARCHAR(120) NOT NULL,
+                address     TEXT         NULL,
+                note        VARCHAR(255) NULL,
+                sort_order  INT          NOT NULL DEFAULT 0,
+                archived_at DATETIME     NULL,
+                created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $columns = [
+            'invoice_account_id' => 'INT UNSIGNED NULL AFTER comp_name',
+            'invoice_code' => 'VARCHAR(12) NULL AFTER invoice_account_id',
+            'invoice_name' => 'VARCHAR(120) NULL AFTER invoice_code',
+            'invoice_ref' => 'VARCHAR(120) NULL AFTER invoice_name',
+            'billed_at' => 'DATETIME NULL AFTER invoice_ref',
+            'billed_ref' => 'VARCHAR(60) NULL AFTER billed_at',
+        ];
+        foreach ($columns as $name => $def) {
+            $this->ensureColumn('sales', $name, "ALTER TABLE sales ADD COLUMN {$name} {$def}");
+        }
+        $this->ensureIndex('sales', 'idx_sales_invoice', 'ALTER TABLE sales ADD INDEX idx_sales_invoice (invoice_account_id, billed_at)');
+        $this->db->exec("ALTER TABLE sales MODIFY COLUMN payment ENUM('cash','card','comp','invoice') NOT NULL");
+        $this->ensureColumn('z_reports', 'invoice_cents', 'ALTER TABLE z_reports ADD COLUMN invoice_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER card_cents');
+    }
+
+    /**
+     * Pfand-Rückgabe "auf Rechnung": a Firma handing back Krüge gets the Pfand credited on its
+     * invoice instead of cash from the drawer. The deposit_return row then has amount_cents 0
+     * (drawer untouched) and credit_cents = the credited amount, frozen like everything else.
+     * z_reports.invoice_cents becomes signed: a day with only Rückgaben is a credit (negative).
+     */
+    private function migrateToV16(): void
+    {
+        $this->ensureColumn('cash_movements', 'credit_cents', 'ALTER TABLE cash_movements ADD COLUMN credit_cents INT UNSIGNED NULL AFTER amount_cents');
+        $this->db->exec('ALTER TABLE z_reports MODIFY COLUMN invoice_cents INT NOT NULL DEFAULT 0');
     }
 
     private function ensureIndex(string $table, string $indexName, string $alterSql): void
