@@ -6,9 +6,29 @@ $config = require __DIR__ . '/../config/config.php';
 
 use Festkasse\Api;
 use Festkasse\Db;
+use Festkasse\InstallPage;
+use Festkasse\Installer;
 use Festkasse\Migrator;
+use Festkasse\Support;
 
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '/';
+
+// Fresh upload without server settings: send everything to the web installer. Once
+// config/config.local.php (or .env) exists, /install is gone and the app runs normally.
+if (!Installer::isConfigured()) {
+    if (rtrim($path, '/') === '/install') {
+        (new InstallPage())->handle();
+    } elseif (str_starts_with($path, '/api/')) {
+        Support::sendJson(['error' => 'Die Kasse ist noch nicht eingerichtet — bitte /install aufrufen.'], 503);
+    } else {
+        header('Location: /install', true, 302);
+    }
+    exit;
+}
+if (rtrim($path, '/') === '/install') {
+    header('Location: /', true, 302);
+    exit;
+}
 
 if (str_starts_with($path, '/api/')) {
     $db = Db::get();

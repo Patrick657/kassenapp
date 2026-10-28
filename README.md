@@ -24,6 +24,20 @@ bin/        setup.php (CLI setup)
 
 ## First deployment
 
+**Easiest: the web installer.** Upload the app (document root → `public/`, see step 1 below), create
+an empty database + DB user in the hosting panel, then open the site in the browser. As long as
+neither `config/config.local.php` nor `.env` exists, every request is redirected to **`/install`**:
+one form for DB credentials (connection is tested; the database is created if the user is allowed
+to), shop name, access code (exactly 4 digits — that's what the PIN pad takes) and delete code,
+recovery email, `APP_URL`/`APP_HTTPS` (pre-filled from the request) and optional SMTP. On submit it
+applies schema + migrations (same code as `bin/setup.php`, `src/Installer.php`), sets the codes and
+writes `config/config.local.php`. If `config/` isn't writable by PHP, it shows the file content to
+upload by hand instead. As soon as either config file exists, `/install` redirects to `/` and is
+gone for good — it can never touch an existing setup. Until then the site is unconfigured and the
+installer is open to whoever opens it first, so run it right after uploading.
+
+The manual route below does the same by hand.
+
 1. Upload the whole `app/` directory to the server, but point the vhost's document root at
    `app/public` — `src/`, `config/`, `migrations/` must **not** be web-reachable.
 2. Copy `.env.example` to `.env` next to `config/config.php` (i.e. `app/.env`) and fill in your

@@ -8,30 +8,16 @@ require_once __DIR__ . '/../src/bootstrap.php';
 $config = require __DIR__ . '/../config/config.php';
 
 use Festkasse\Db;
-use Festkasse\Migrator;
+use Festkasse\Installer;
 
 $opts = getopt('', ['access-code:', 'delete-code:', 'demo']);
 
 $db = Db::get();
 
-echo "Wende Basis-Schema an…\n";
-$db->exec(file_get_contents(__DIR__ . '/../migrations/001_schema.sql'));
-
-// Demo articles must exist BEFORE later migrations run, not after: migration v2's categories
-// backfill reads DISTINCT products.category — on a brand-new install with --demo, that has to
-// see the seeded demo articles, or the categories table ends up empty despite matching products.
-if (isset($opts['demo'])) {
-    $existing = (int) $db->query('SELECT COUNT(*) FROM products')->fetchColumn();
-    if ($existing === 0) {
-        echo "Spiele Demo-Artikel ein…\n";
-        $db->exec(file_get_contents(__DIR__ . '/../migrations/002_seed_demo.sql'));
-    } else {
-        echo "Artikel bereits vorhanden — Demo-Daten übersprungen.\n";
-    }
+echo "Wende Schema und Migrationen an…\n";
+foreach (Installer::initSchema($db, isset($opts['demo'])) as $line) {
+    echo $line . ".\n";
 }
-
-echo "Wende weitere Migrationen an…\n";
-(new Migrator($db))->ensureUpToDate();
 
 $accessCode = $opts['access-code'] ?? null;
 $deleteCode = $opts['delete-code'] ?? null;
@@ -41,13 +27,12 @@ if ($accessCode !== null || $deleteCode !== null) {
         fwrite(STDERR, "Fehler: Zugangscode und Löschkennwort müssen unterschiedlich sein.\n");
         exit(1);
     }
-    $stmt = $db->prepare('REPLACE INTO settings (`key`, value) VALUES (?, ?)');
     if ($accessCode !== null) {
-        $stmt->execute(['access_code_hash', password_hash((string) $accessCode, PASSWORD_DEFAULT)]);
+        Installer::setCodeHash($db, 'access_code_hash', (string) $accessCode);
         echo "Zugangscode gesetzt.\n";
     }
     if ($deleteCode !== null) {
-        $stmt->execute(['delete_code_hash', password_hash((string) $deleteCode, PASSWORD_DEFAULT)]);
+        Installer::setCodeHash($db, 'delete_code_hash', (string) $deleteCode);
         echo "Löschkennwort gesetzt.\n";
     }
 } else {
